@@ -1,0 +1,51 @@
+# ==============================================================================
+# STOP SPEND — Supabase CLI Configuration (supabase/config.toml)
+# Project Reference: zsnvclyoypabmgqqaizj (STOP SPEND)
+# ==============================================================================
+
+project_id = "zsnvclyoypabmgqqaizj"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+major_version = 15
+
+[auth]
+enabled = true
+# URL real del despliegue HTTPS (GitHub Pages del repositorio Jems2024/Money-app)
+site_url = "https://jems2024.github.io/Money-app"
+additional_redirect_urls = [
+  "https://jems2024.github.io/Money-app/**",
+  "http://localhost:5173/**",
+  "http://localhost:4173/**"
+]
+jwt_expiry = 3600
+enable_refresh_token_rotation = true
+refresh_token_reuse_interval = 10
+# Inscripción privada: desactivar el registro público abierto tras crear la cuenta de Jared
+enable_signup = false
+enable_anonymous_sign_ins = false
+
+[auth.email]
+enable_signup = false
+double_confirm_changes = true
+enable_confirmations = true
+
+[functions.bank-auth]
+verify_jwt = true
+
+[functions.bank-callback]
+# Callback puede volver desde navegador externo (Safari tras CaixaBankNow) validando state de 1 uso en servidor
+verify_jwt = false
+
+[functions.bank-sync]
+verify_jwt = true
+
+[functions.alerts-dispatch]
+verify_jwt = true

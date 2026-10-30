@@ -1,0 +1,20 @@
+{
+  "name": "STOP SPEND — Control de Gasto Personal",
+  "short_name": "STOP SPEND",
+  "description": "¿Cuánto me queda en mi presupuesto personal y cómo cambia si compro esto?",
+  "lang": "es-ES",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#090d16",
+  "theme_color": "#090d16",
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "192x192 512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
