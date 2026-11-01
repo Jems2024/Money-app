@@ -7,9 +7,12 @@ import {
   Calculator,
   PlusCircle,
   HelpCircle,
+  Wallet,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
-import { formatEur, parseMoneyToCents } from '../domain/money';
-import { CalendarDateISO } from '../domain/dates/madrid';
+import { centsToSpanishDecimal, formatEur, parseMoneyToCents } from '../domain/money';
+import { CalendarDateISO, PeriodMonthKey } from '../domain/dates/madrid';
 import { Account, SpendingScope } from '../domain/ledger';
 import {
   EstimatedLiquidityResult,
@@ -20,7 +23,344 @@ import {
 import { DEFAULT_SPANISH_CATEGORIES } from '../domain/categorization';
 
 // ============================================================================
-// 1. "CÓMO SE CALCULA" BREAKDOWN MODAL (Section 6)
+// 1. SIMPLE MONTHLY BUDGET MODAL ("¿Cuánto quieres gastar este mes?")
+// ============================================================================
+
+export const BudgetSetupModal: React.FC<{
+  isOpen: boolean;
+  periodKey: PeriodMonthKey;
+  periodLabelSpanish: string;
+  isEditingExisting: boolean;
+  initialMonthlyLimitCents: number | null;
+  initialCategoryLimitsCents: Record<string, number>;
+  initialScopeMode: 'personal_only' | 'all_spending';
+  initialSelectedAccountIds: string[];
+  ownedAccounts: readonly Account[];
+  excludedNonPersonalCount: number;
+  excludedNonPersonalCents: number;
+  onSave: (params: {
+    monthlyLimitCents: number;
+    categoryLimitsCents: Record<string, number>;
+    scopeMode: 'personal_only' | 'all_spending';
+    selectedAccountIds: string[];
+  }) => void;
+  onClose: () => void;
+}> = ({
+  isOpen,
+  periodKey,
+  periodLabelSpanish,
+  isEditingExisting,
+  initialMonthlyLimitCents,
+  initialCategoryLimitsCents,
+  initialScopeMode,
+  initialSelectedAccountIds,
+  ownedAccounts,
+  excludedNonPersonalCount,
+  excludedNonPersonalCents,
+  onSave,
+  onClose,
+}) => {
+  const [monthlyLimitInput, setMonthlyLimitInput] = useState('');
+  const [scopeMode, setScopeMode] = useState<'personal_only' | 'all_spending'>(initialScopeMode);
+  const [selectedAccountIds, setSelectedAccountIds] = useState<string[]>(initialSelectedAccountIds);
+  const [showCategoryLimits, setShowCategoryLimits] = useState(false);
+  const [categoryInputs, setCategoryInputs] = useState<Record<string, string>>({});
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (isOpen) {
+      setMonthlyLimitInput(
+        initialMonthlyLimitCents !== null && initialMonthlyLimitCents > 0
+          ? centsToSpanishDecimal(initialMonthlyLimitCents)
+          : ''
+      );
+      setScopeMode(initialScopeMode);
+      setSelectedAccountIds(
+        initialSelectedAccountIds.length > 0
+          ? initialSelectedAccountIds
+          : ownedAccounts.map((a) => a.id)
+      );
+      const nextCatInputs: Record<string, string> = {};
+      let anyCatLimit = false;
+      for (const [catId, cents] of Object.entries(initialCategoryLimitsCents)) {
+        if (cents > 0) {
+          nextCatInputs[catId] = centsToSpanishDecimal(cents);
+          anyCatLimit = true;
+        }
+      }
+      setCategoryInputs(nextCatInputs);
+      setShowCategoryLimits(anyCatLimit);
+      setErrorMsg(null);
+    }
+  }, [
+    isOpen,
+    initialMonthlyLimitCents,
+    initialCategoryLimitsCents,
+    initialScopeMode,
+    initialSelectedAccountIds,
+    ownedAccounts,
+  ]);
+
+  if (!isOpen) return null;
+
+  const handleToggleAccount = (accountId: string) => {
+    setSelectedAccountIds((prev) => {
+      if (prev.includes(accountId)) {
+        if (prev.length <= 1) return prev; // Keep at least one account selected
+        return prev.filter((id) => id !== accountId);
+      }
+      return [...prev, accountId];
+    });
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMsg(null);
+    try {
+      const limitCents = parseMoneyToCents(monthlyLimitInput, {
+        currency: 'EUR',
+        allowNegative: false,
+      });
+      if (limitCents <= 0) {
+        setErrorMsg('Introduce un límite mensual mayor que 0,00 €.');
+        return;
+      }
+
+      const parsedCategoryLimits: Record<string, number> = {};
+      for (const [catId, rawVal] of Object.entries(categoryInputs)) {
+        const trimmed = rawVal.trim();
+        if (!trimmed) continue;
+        const catCents = parseMoneyToCents(trimmed, {
+          currency: 'EUR',
+          allowNegative: false,
+        });
+        if (catCents > 0) {
+          parsedCategoryLimits[catId] = catCents;
+        }
+      }
+
+      onSave({
+        monthlyLimitCents: limitCents,
+        categoryLimitsCents: parsedCategoryLimits,
+        scopeMode,
+        selectedAccountIds,
+      });
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Importe de presupuesto inválido.');
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/80 backdrop-blur-sm p-3"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="budget-modal-title"
+    >
+      <form
+        onSubmit={handleSubmit}
+        className="w-full max-w-md rounded-2xl bg-slate-900 border border-slate-800 p-5 shadow-2xl space-y-4 max-h-[90dvh] overflow-y-auto"
+      >
+        <div className="flex items-start justify-between gap-2">
+          <div>
+            <span className="text-xs font-semibold uppercase tracking-wider text-emerald-400">
+              {isEditingExisting ? 'Editar presupuesto' : 'Crear presupuesto'} · {periodLabelSpanish} ({periodKey})
+            </span>
+            <h2
+              id="budget-modal-title"
+              className="text-lg font-bold text-slate-100 flex items-center gap-2 mt-0.5"
+            >
+              <Wallet className="w-5 h-5 text-emerald-400" />
+              <span>¿Cuánto quieres gastar este mes?</span>
+            </h2>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Cerrar configuración de presupuesto"
+            className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl bg-slate-800 text-slate-300 hover:bg-slate-700"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div
+          data-testid="budget-does-not-move-money-note"
+          className="rounded-xl bg-slate-950 border border-slate-800 p-3 text-xs text-slate-300"
+        >
+          Fijar un presupuesto establece tu límite de control para el mes: <strong>no mueve dinero ni cambia el saldo de tu banco</strong>.
+        </div>
+
+        {/* Monthly Spending Limit Input */}
+        <div>
+          <label
+            htmlFor="budget-monthly-limit-input"
+            className="block text-xs font-semibold uppercase tracking-wider text-emerald-400 mb-1"
+          >
+            Límite de gasto mensual (EUR)
+          </label>
+          <input
+            id="budget-monthly-limit-input"
+            data-testid="budget-monthly-limit-input"
+            type="text"
+            inputMode="decimal"
+            autoFocus
+            placeholder="Ej. 600,00"
+            value={monthlyLimitInput}
+            onChange={(e) => setMonthlyLimitInput(e.target.value)}
+            className="w-full rounded-xl bg-slate-950 border border-slate-700 px-4 py-3 text-2xl font-mono font-bold text-slate-100 focus:border-emerald-500 focus:outline-none"
+          />
+        </div>
+
+        {/* Budget Scope: Accounts & Personal vs All Spending */}
+        <div className="rounded-xl bg-slate-950/90 border border-slate-800 p-3.5 space-y-3 text-xs">
+          <div>
+            <span className="font-semibold text-slate-200 block mb-1.5">
+              Cuentas incluidas en este presupuesto:
+            </span>
+            <div className="flex flex-wrap gap-2">
+              {ownedAccounts
+                .filter((a) => a.type !== 'credit_card')
+                .map((acc) => {
+                  const checked = selectedAccountIds.includes(acc.id);
+                  return (
+                    <button
+                      key={acc.id}
+                      type="button"
+                      data-testid={`budget-scope-acc-${acc.id}`}
+                      onClick={() => handleToggleAccount(acc.id)}
+                      className={`min-h-[38px] px-3 py-1.5 rounded-xl border font-medium transition ${
+                        checked
+                          ? 'bg-emerald-950/80 border-emerald-500 text-emerald-200'
+                          : 'bg-slate-900 border-slate-800 text-slate-400'
+                      }`}
+                    >
+                      {acc.name} {checked ? '✓' : ''}
+                    </button>
+                  );
+                })}
+            </div>
+          </div>
+
+          <div>
+            <span className="font-semibold text-slate-200 block mb-1.5">
+              Gastos incluidos:
+            </span>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <button
+                type="button"
+                data-testid="budget-scope-personal-only"
+                onClick={() => setScopeMode('personal_only')}
+                className={`min-h-[42px] px-3 py-2 rounded-xl border text-left font-medium ${
+                  scopeMode === 'personal_only'
+                    ? 'bg-indigo-950/80 border-indigo-500 text-indigo-200'
+                    : 'bg-slate-900 border-slate-800 text-slate-400'
+                }`}
+              >
+                Solo gasto personal (excluir no personales)
+              </button>
+              <button
+                type="button"
+                data-testid="budget-scope-all-spending"
+                onClick={() => setScopeMode('all_spending')}
+                className={`min-h-[42px] px-3 py-2 rounded-xl border text-left font-medium ${
+                  scopeMode === 'all_spending'
+                    ? 'bg-indigo-950/80 border-indigo-500 text-indigo-200'
+                    : 'bg-slate-900 border-slate-800 text-slate-400'
+                }`}
+              >
+                Todos los gastos de las cuentas
+              </button>
+            </div>
+            {scopeMode === 'personal_only' && excludedNonPersonalCount > 0 && (
+              <p className="text-[11px] text-amber-300 mt-1.5">
+                Nota: Hay {excludedNonPersonalCount} movimiento(s) marcados como no personales ({formatEur(excludedNonPersonalCents)}) que se muestran por separado y no restan de este presupuesto.
+              </p>
+            )}
+          </div>
+        </div>
+
+        {/* Optional Category Limits */}
+        <div className="rounded-xl bg-slate-950/90 border border-slate-800 p-3.5 space-y-3 text-xs">
+          <button
+            type="button"
+            data-testid="toggle-optional-category-limits-btn"
+            onClick={() => setShowCategoryLimits((v) => !v)}
+            className="w-full flex items-center justify-between font-semibold text-slate-200"
+          >
+            <span>Límites por categoría (opcional)</span>
+            {showCategoryLimits ? (
+              <ChevronUp className="w-4 h-4 text-slate-400" />
+            ) : (
+              <ChevronDown className="w-4 h-4 text-slate-400" />
+            )}
+          </button>
+
+          {showCategoryLimits && (
+            <div className="space-y-2 pt-1">
+              <p className="text-[11px] text-slate-400">
+                Puedes fijar topes orientativos en las categorías que quieras vigilar o dejarlos en blanco.
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {DEFAULT_SPANISH_CATEGORIES.filter((c) => c.id !== 'income').map((cat) => (
+                  <div key={cat.id}>
+                    <label className="block text-[11px] text-slate-400 mb-1">
+                      {cat.nameSpanish}
+                    </label>
+                    <input
+                      data-testid={`cat-limit-input-${cat.id}`}
+                      type="text"
+                      inputMode="decimal"
+                      placeholder="Sin límite"
+                      value={categoryInputs[cat.id] ?? ''}
+                      onChange={(e) =>
+                        setCategoryInputs((prev) => ({
+                          ...prev,
+                          [cat.id]: e.target.value,
+                        }))
+                      }
+                      className="w-full min-h-[38px] rounded-lg bg-slate-900 border border-slate-700 px-2.5 text-xs font-mono text-slate-100"
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {errorMsg && (
+          <div
+            role="alert"
+            className="rounded-xl bg-rose-950/60 border border-rose-700 px-3 py-2 text-xs text-rose-200 flex items-center gap-2"
+          >
+            <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400" />
+            <span>{errorMsg}</span>
+          </div>
+        )}
+
+        <div className="flex items-center gap-2 pt-1">
+          <button
+            type="button"
+            onClick={onClose}
+            className="min-h-[48px] px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-medium"
+          >
+            Cancelar
+          </button>
+          <button
+            type="submit"
+            data-testid="save-budget-button"
+            className="flex-1 min-h-[48px] px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-bold shadow-lg shadow-emerald-950/50"
+          >
+            Guardar presupuesto
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+};
+
+// ============================================================================
+// 2. "CÓMO SE CALCULA" BREAKDOWN MODAL
 // ============================================================================
 
 export const HowItIsCalculatedModal: React.FC<{
@@ -57,7 +397,6 @@ export const HowItIsCalculatedModal: React.FC<{
         </div>
 
         <div className="mt-4 space-y-4 text-sm">
-          {/* Account Scope */}
           <div className="rounded-xl bg-slate-950/80 border border-slate-800/80 p-3 space-y-1.5">
             <div className="flex items-center justify-between text-xs text-slate-400">
               <span>Cuentas incluidas:</span>
@@ -89,7 +428,6 @@ export const HowItIsCalculatedModal: React.FC<{
             </div>
           </div>
 
-          {/* Formula Steps */}
           <div className="space-y-2">
             <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
               Desglose paso a paso
@@ -116,52 +454,6 @@ export const HowItIsCalculatedModal: React.FC<{
               ))}
             </div>
           </div>
-
-          {/* Active Reservations */}
-          {breakdown.activeReservations.length > 0 && (
-            <div className="space-y-2">
-              <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                Fondos comprometidos y reservas activas
-              </h3>
-              <div className="space-y-1.5">
-                {breakdown.activeReservations.map((res, i) => (
-                  <div
-                    key={i}
-                    className="flex items-center justify-between rounded-lg bg-slate-800/50 px-3 py-2 text-xs"
-                  >
-                    <span className="text-slate-200">
-                      {res.name}{' '}
-                      <span className="text-slate-400">
-                        ({res.type === 'savings' ? 'Ahorro protegido' : 'Recibo / Obligación'})
-                      </span>
-                    </span>
-                    <span className="font-mono font-semibold text-amber-300">
-                      {formatEur(res.remainingCents)}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Missing Information & Uncertainties */}
-          {(breakdown.missingInformationWarnings.length > 0 ||
-            breakdown.uncertainties.length > 0) && (
-            <div className="rounded-xl bg-amber-950/40 border border-amber-700/50 p-3 space-y-2">
-              <div className="flex items-center gap-2 text-amber-300 font-semibold text-xs">
-                <AlertTriangle className="w-4 h-4 shrink-0" />
-                <span>Información incompleta o pendiente de revisión</span>
-              </div>
-              <ul className="list-disc list-inside text-xs text-amber-200/90 space-y-1">
-                {breakdown.missingInformationWarnings.map((w, i) => (
-                  <li key={`mw-${i}`}>{w}</li>
-                ))}
-                {breakdown.uncertainties.map((u, i) => (
-                  <li key={`unc-${i}`}>{u}</li>
-                ))}
-              </ul>
-            </div>
-          )}
         </div>
 
         <div className="mt-5 flex justify-end">
@@ -179,7 +471,7 @@ export const HowItIsCalculatedModal: React.FC<{
 };
 
 // ============================================================================
-// 2. QUICK EXPENSE ENTRY MODAL ("Añadir gasto" < 10 seconds, Section 7)
+// 3. QUICK EXPENSE ENTRY MODAL ("Añadir gasto")
 // ============================================================================
 
 export const QuickExpenseModal: React.FC<{
@@ -234,7 +526,14 @@ export const QuickExpenseModal: React.FC<{
       setUserNote('');
       setErrorMsg(null);
     }
-  }, [isOpen, initialAmountDecimal, defaultCategoryId, defaultAccountId, defaultDate, initialSmallSpending]);
+  }, [
+    isOpen,
+    initialAmountDecimal,
+    defaultCategoryId,
+    defaultAccountId,
+    defaultDate,
+    initialSmallSpending,
+  ]);
 
   if (!isOpen) return null;
 
@@ -280,9 +579,12 @@ export const QuickExpenseModal: React.FC<{
         className="w-full max-w-md rounded-2xl bg-slate-900 border border-slate-800 p-5 shadow-2xl space-y-4 max-h-[90dvh] overflow-y-auto"
       >
         <div className="flex items-center justify-between">
-          <h2 id="quick-expense-title" className="text-lg font-bold text-slate-100 flex items-center gap-2">
+          <h2
+            id="quick-expense-title"
+            className="text-lg font-bold text-slate-100 flex items-center gap-2"
+          >
             <PlusCircle className="w-5 h-5 text-emerald-400" />
-            <span>Añadir gasto rápido</span>
+            <span>Añadir gasto</span>
           </h2>
           <button
             type="button"
@@ -294,9 +596,11 @@ export const QuickExpenseModal: React.FC<{
           </button>
         </div>
 
-        {/* Amount First! */}
         <div>
-          <label htmlFor="quick-amount-input" className="block text-xs font-semibold uppercase tracking-wider text-emerald-400 mb-1">
+          <label
+            htmlFor="quick-amount-input"
+            className="block text-xs font-semibold uppercase tracking-wider text-emerald-400 mb-1"
+          >
             Importe en EUR (acepta coma, ej. 2,50)
           </label>
           <input
@@ -312,36 +616,36 @@ export const QuickExpenseModal: React.FC<{
           />
         </div>
 
-        {/* Favorite Category Chips */}
         <div>
           <label className="block text-xs font-semibold text-slate-400 mb-1.5">
-            Categoría rápida
+            Categoría
           </label>
           <div className="grid grid-cols-2 gap-2">
-            {DEFAULT_SPANISH_CATEGORIES.filter((c) => c.id !== 'income').slice(0, 6).map((cat) => {
-              const active = categoryId === cat.id;
-              return (
-                <button
-                  key={cat.id}
-                  type="button"
-                  onClick={() => {
-                    setCategoryId(cat.id);
-                    setSmallSpendingTagged(cat.defaultSmallSpendingCandidate);
-                  }}
-                  className={`min-h-[44px] px-3 py-2 rounded-xl text-left text-xs font-medium border transition ${
-                    active
-                      ? 'bg-emerald-950/80 border-emerald-500 text-emerald-200'
-                      : 'bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700'
-                  }`}
-                >
-                  {cat.nameSpanish}
-                </button>
-              );
-            })}
+            {DEFAULT_SPANISH_CATEGORIES.filter((c) => c.id !== 'income')
+              .slice(0, 6)
+              .map((cat) => {
+                const active = categoryId === cat.id;
+                return (
+                  <button
+                    key={cat.id}
+                    type="button"
+                    onClick={() => {
+                      setCategoryId(cat.id);
+                      setSmallSpendingTagged(cat.defaultSmallSpendingCandidate);
+                    }}
+                    className={`min-h-[44px] px-3 py-2 rounded-xl text-left text-xs font-medium border transition ${
+                      active
+                        ? 'bg-emerald-950/80 border-emerald-500 text-emerald-200'
+                        : 'bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700'
+                    }`}
+                  >
+                    {cat.nameSpanish}
+                  </button>
+                );
+              })}
           </div>
         </div>
 
-        {/* Small Purchase & Scope Toggles */}
         <div className="grid grid-cols-2 gap-2">
           <button
             type="button"
@@ -354,7 +658,9 @@ export const QuickExpenseModal: React.FC<{
             }`}
           >
             <span>Compra pequeña</span>
-            <span className="font-bold">{smallSpendingTagged && scope === 'personal' ? 'Sí' : 'No'}</span>
+            <span className="font-bold">
+              {smallSpendingTagged && scope === 'personal' ? 'Sí' : 'No'}
+            </span>
           </button>
 
           <button
@@ -368,11 +674,12 @@ export const QuickExpenseModal: React.FC<{
             }`}
           >
             <span>Ámbito</span>
-            <span className="font-bold">{scope === 'personal' ? 'Personal' : 'No personal'}</span>
+            <span className="font-bold">
+              {scope === 'personal' ? 'Personal' : 'No personal'}
+            </span>
           </button>
         </div>
 
-        {/* Account & Concept */}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
             <label htmlFor="quick-account-select" className="block text-xs text-slate-400 mb-1">
@@ -470,7 +777,7 @@ export const QuickExpenseModal: React.FC<{
 };
 
 // ============================================================================
-// 3. PURCHASE SIMULATOR MODAL ("¿Puedo comprar esto?", Section 7)
+// 4. PURCHASE SIMULATOR MODAL ("¿Puedo comprar esto?", Secondary in Presupuesto)
 // ============================================================================
 
 export const PurchaseSimulatorModal: React.FC<{
@@ -488,13 +795,16 @@ export const PurchaseSimulatorModal: React.FC<{
 }) => {
   const [amountInput, setAmountInput] = useState('15,00');
   const [targetEnvelope, setTargetEnvelope] = useState<'small_purchases' | 'flexible_personal'>(
-    'small_purchases'
+    'flexible_personal'
   );
   const [coolingSecondsLeft, setCoolingSecondsLeft] = useState<number | null>(null);
 
   useEffect(() => {
     if (coolingSecondsLeft === null || coolingSecondsLeft <= 0) return;
-    const t = setTimeout(() => setCoolingSecondsLeft((s) => (s !== null ? s - 1 : null)), 1000);
+    const t = setTimeout(
+      () => setCoolingSecondsLeft((s) => (s !== null ? s - 1 : null)),
+      1000
+    );
     return () => clearTimeout(t);
   }, [coolingSecondsLeft]);
 
@@ -537,7 +847,10 @@ export const PurchaseSimulatorModal: React.FC<{
             <span className="text-xs font-semibold uppercase tracking-wider text-indigo-400">
               Simulador sin guardar movimiento
             </span>
-            <h2 id="sim-modal-title" className="text-lg font-bold text-slate-100 flex items-center gap-2">
+            <h2
+              id="sim-modal-title"
+              className="text-lg font-bold text-slate-100 flex items-center gap-2"
+            >
               <Calculator className="w-5 h-5 text-indigo-400" />
               <span>¿Puedo comprar esto?</span>
             </h2>
@@ -552,10 +865,12 @@ export const PurchaseSimulatorModal: React.FC<{
           </button>
         </div>
 
-        {/* Inputs */}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
-            <label htmlFor="sim-amount-input" className="block text-xs font-semibold text-slate-400 mb-1">
+            <label
+              htmlFor="sim-amount-input"
+              className="block text-xs font-semibold text-slate-400 mb-1"
+            >
               Precio a simular (EUR)
             </label>
             <input
@@ -570,8 +885,11 @@ export const PurchaseSimulatorModal: React.FC<{
           </div>
 
           <div>
-            <label htmlFor="sim-envelope-select" className="block text-xs font-semibold text-slate-400 mb-1">
-              Sobre afectado
+            <label
+              htmlFor="sim-envelope-select"
+              className="block text-xs font-semibold text-slate-400 mb-1"
+            >
+              Tipo de compra
             </label>
             <select
               id="sim-envelope-select"
@@ -582,8 +900,8 @@ export const PurchaseSimulatorModal: React.FC<{
               }
               className="w-full min-h-[48px] rounded-xl bg-slate-950 border border-slate-700 px-3 text-sm text-slate-200"
             >
-              <option value="small_purchases">Compras pequeñas (40 €)</option>
-              <option value="flexible_personal">Gasto personal flexible (54 €)</option>
+              <option value="flexible_personal">Gasto mensual general</option>
+              <option value="small_purchases">Compra pequeña</option>
             </select>
           </div>
         </div>
@@ -596,7 +914,6 @@ export const PurchaseSimulatorModal: React.FC<{
 
         {simResult && (
           <div className="space-y-3" data-testid="simulation-result-card">
-            {/* Headline Verdict */}
             <div
               className={`rounded-xl border p-3.5 flex items-start gap-3 ${
                 isExceeding
@@ -625,82 +942,30 @@ export const PurchaseSimulatorModal: React.FC<{
               </div>
             </div>
 
-            {/* Before / After Comparison Table */}
             <div className="rounded-xl bg-slate-950 border border-slate-800 divide-y divide-slate-800 text-xs">
               <div className="p-3 flex items-center justify-between">
-                <span className="text-slate-400">
-                  Sobre ({targetEnvelope === 'small_purchases' ? 'Compras pequeñas' : 'Flexible'})
-                </span>
+                <span className="text-slate-400">Presupuesto del mes (Te quedan)</span>
                 <span className="font-mono">
-                  <span className="text-slate-300">{formatEur(simResult.targetEnvelopeBeforeCents)}</span>
-                  <span className="mx-1.5 text-slate-500">→</span>
-                  <strong
-                    data-testid="sim-target-after"
-                    className={
-                      simResult.targetEnvelopeAfterCents < 0 ? 'text-rose-400' : 'text-emerald-400'
-                    }
-                  >
-                    {formatEur(simResult.targetEnvelopeAfterCents)}
-                  </strong>
-                </span>
-              </div>
-
-              <div className="p-3 flex items-center justify-between">
-                <span className="text-slate-400">Presupuesto personal gastable total</span>
-                <span className="font-mono">
-                  <span className="text-slate-300">{formatEur(simResult.totalSpendableBeforeCents)}</span>
+                  <span className="text-slate-300">
+                    {formatEur(simResult.totalSpendableBeforeCents)}
+                  </span>
                   <span className="mx-1.5 text-slate-500">→</span>
                   <strong
                     data-testid="sim-total-after"
                     className={
-                      simResult.totalSpendableAfterCents < 0 ? 'text-rose-400' : 'text-emerald-400'
+                      simResult.totalSpendableAfterCents < 0
+                        ? 'text-rose-400'
+                        : 'text-emerald-400'
                     }
                   >
                     {formatEur(simResult.totalSpendableAfterCents)}
                   </strong>
                 </span>
               </div>
-
-              <div className="p-3 flex items-center justify-between">
-                <span className="text-slate-400">Guía orientativa por día restante</span>
-                <span className="font-mono">
-                  <span className="text-slate-300">
-                    {formatEur(simResult.dailyPacingBeforeCents, { unknownLabel: 'N/A' })}/día
-                  </span>
-                  <span className="mx-1.5 text-slate-500">→</span>
-                  <strong className="text-slate-100">
-                    {formatEur(simResult.dailyPacingAfterCents, { unknownLabel: 'N/A' })}/día
-                  </strong>
-                </span>
-              </div>
-
-              <div className="p-3 flex items-center justify-between">
-                <span className="text-slate-400">Liquidez libre estimada en cuenta</span>
-                <span className="font-mono">
-                  {simResult.liquidityBeforeCents === null ? (
-                    <span className="text-amber-300">Desconocido (Sin saldo inicial)</span>
-                  ) : (
-                    <>
-                      <span className="text-slate-300">{formatEur(simResult.liquidityBeforeCents)}</span>
-                      <span className="mx-1.5 text-slate-500">→</span>
-                      <strong
-                        className={
-                          (simResult.liquidityAfterCents ?? 0) < 0
-                            ? 'text-rose-400'
-                            : 'text-emerald-400'
-                        }
-                      >
-                        {formatEur(simResult.liquidityAfterCents)}
-                      </strong>
-                    </>
-                  )}
-                </span>
-              </div>
             </div>
           </div>
         )}
 
-        {/* Voluntary Cooling-Off Timer */}
         {coolingSecondsLeft !== null && coolingSecondsLeft > 0 && (
           <div className="rounded-xl bg-indigo-950/50 border border-indigo-700/60 p-3 flex items-center justify-between text-xs text-indigo-200">
             <div className="flex items-center gap-2">
@@ -717,7 +982,6 @@ export const PurchaseSimulatorModal: React.FC<{
           </div>
         )}
 
-        {/* Actions: Registrar compra | Esperar | Cancelar */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1">
           <button
             type="button"

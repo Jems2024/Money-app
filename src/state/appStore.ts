@@ -12,7 +12,6 @@ import {
 } from '../domain/ledger';
 import {
   BudgetPeriodAllocation,
-  createBudgetAllocation,
   CrossPeriodRefundPolicy,
   PERSONAL_ENVELOPE_TEMPLATE_EUR,
 } from '../domain/budgets';
@@ -39,7 +38,19 @@ export interface AppUserState {
   userId: string;
   displayName: string;
   currentPeriodKey: PeriodMonthKey;
+  /** Whether the user has completed the initial Bank-First Welcome screen */
+  bankOnboardingCompleted: boolean;
+  bankConnectedChoice: 'pending' | 'connected' | 'skipped';
+  /** Selected bank account ID or 'all_bank' for the Home "Saldo en tu banco" card */
+  selectedHomeBankScope: 'all_bank' | string;
+  /** Whether a monthly spending budget has been explicitly configured by the user */
   onboardingConfirmed: boolean;
+  /** True if an existing confirmed budget matches the legacy 174/94/80/40 EUR template */
+  hasLegacyTemplateBudget: boolean;
+  /** Budget scope: whether non-personal transactions are excluded from the monthly budget limit */
+  budgetScopeMode: 'personal_only' | 'all_spending';
+  /** Which account IDs count toward the user's monthly spending budget */
+  budgetSelectedAccountIds: string[];
   plannedMonthlyIncomeCents: number;
   refundPolicy: CrossPeriodRefundPolicy;
   rememberedAccountId: string;
@@ -107,6 +118,25 @@ export function getUserStateStorageKey(userId: string): string {
   return `stopspend_user_state_v1_${userId}`;
 }
 
+/**
+ * Checks whether a budget allocation matches the legacy 174 / 94 / 80 / 40 EUR onboarding template.
+ */
+export function isLegacyDefaultTemplateAllocation(
+  alloc: BudgetPeriodAllocation | undefined | null
+): boolean {
+  if (!alloc) return false;
+  return (
+    alloc.protectedSavingsAllocatedCents ===
+      PERSONAL_ENVELOPE_TEMPLATE_EUR.protectedSavingsAllocationCents &&
+    alloc.smallPurchasesAllocatedCents ===
+      PERSONAL_ENVELOPE_TEMPLATE_EUR.smallPurchasesAllocationCents &&
+    alloc.flexibleSpendingAllocatedCents ===
+      PERSONAL_ENVELOPE_TEMPLATE_EUR.flexibleSpendingAllocationCents &&
+    alloc.totalPersonalAllocatedCents ===
+      PERSONAL_ENVELOPE_TEMPLATE_EUR.totalPersonalAllocationCents
+  );
+}
+
 export function createInitialUserState(
   userId: string,
   displayName: string = 'Jared',
@@ -131,6 +161,7 @@ export function createInitialUserState(
     type: 'bank',
     includeInLiquidity: true,
     providerCode: 'enable_banking',
+    ibanMasked: 'ES12 **** **** 3456',
     createdAtUtc: nowInstantUtc,
   });
 
@@ -143,17 +174,8 @@ export function createInitialUserState(
     createdAtUtc: nowInstantUtc,
   });
 
-  const defaultAllocation = createBudgetAllocation({
-    id: `bud_${periodKey}`,
-    userId,
-    periodKey,
-    confirmedByUser: false, // Requires explicit user confirmation in onboarding!
-    protectedSavingsAllocatedCents: PERSONAL_ENVELOPE_TEMPLATE_EUR.protectedSavingsAllocationCents,
-    smallPurchasesAllocatedCents: PERSONAL_ENVELOPE_TEMPLATE_EUR.smallPurchasesAllocationCents,
-    flexibleSpendingAllocatedCents: PERSONAL_ENVELOPE_TEMPLATE_EUR.flexibleSpendingAllocationCents,
-  });
-
-  const envModeRaw = (import.meta.env.VITE_BANK_PROVIDER_MODE as string | undefined) ?? 'unconfigured';
+  const envModeRaw =
+    (import.meta.env.VITE_BANK_PROVIDER_MODE as string | undefined) ?? 'unconfigured';
   const bankMode: ProviderEnvironmentMode =
     envModeRaw === 'sandbox' || envModeRaw === 'production' ? envModeRaw : 'unconfigured';
 
@@ -161,21 +183,25 @@ export function createInitialUserState(
     userId,
     displayName,
     currentPeriodKey: periodKey,
+    bankOnboardingCompleted: false,
+    bankConnectedChoice: 'pending',
+    selectedHomeBankScope: bankAccount.id,
+    // Requirement 1: Remove automatic 174/94/80/40 EUR setup. Never create or confirm a budget without the user choosing it!
     onboardingConfirmed: false,
+    hasLegacyTemplateBudget: false,
+    budgetScopeMode: 'personal_only',
+    budgetSelectedAccountIds: [bankAccount.id, cashAccount.id],
     plannedMonthlyIncomeCents: 0,
     refundPolicy: 'CREDIT_CURRENT_PERIOD',
     rememberedAccountId: bankAccount.id,
     rememberedCategoryId: 'coffee_snacks',
     accounts: [cashAccount, bankAccount, savingsAccount],
-    // Invariant (Acceptance Test 22 & 23): Never seed fake balances or transactions!
-    // Liquidity starts as `null` ("Desconocido") until user enters opening funds or connects bank.
+    // Invariant: Never seed fake balances or transactions!
     snapshots: [],
     sourceRecords: [],
     transactions: [],
     auditLinks: [],
-    budgetAllocations: {
-      [periodKey]: defaultAllocation,
-    },
+    budgetAllocations: {},
     obligations: [],
     savingsReservations: [],
     categorizationRules: [],
@@ -205,6 +231,72 @@ export function createInitialUserState(
   };
 }
 
+/**
+ * Normalizes and upgrades a loaded `AppUserState` so that:
+ * 1. `currentPeriodKey` always rolls over to the current `Europe/Madrid` month on session load.
+ * 2. Unconfirmed legacy 174/94/80/40 placeholder budgets are removed (never treated as user-created).
+ * 3. Confirmed legacy 174/94/80/40 budgets are preserved (not silently deleted) and flagged with
+ *    `hasLegacyTemplateBudget: true` so the user can explicitly reset them if desired.
+ * 4. All genuine user-entered transactions, reconciliation links, and confirmed budgets survive intact.
+ */
+export function normalizeLoadedUserState(
+  loaded: Partial<AppUserState> & { userId: string },
+  displayNameFallback: string = 'Jared',
+  nowInstantUtc: string = new Date().toISOString()
+): AppUserState {
+  const base = createInitialUserState(loaded.userId, displayNameFallback, nowInstantUtc);
+  const currentMadridPeriod = getMadridDateParts(nowInstantUtc).periodKey;
+
+  const cleanedAllocations: Record<PeriodMonthKey, BudgetPeriodAllocation> = {};
+  let hasLegacyConfirmed = false;
+  let anyConfirmedBudget = false;
+
+  if (loaded.budgetAllocations) {
+    for (const [pk, alloc] of Object.entries(loaded.budgetAllocations)) {
+      if (!alloc) continue;
+      if (!alloc.confirmedByUser && isLegacyDefaultTemplateAllocation(alloc)) {
+        // Drop unconfirmed legacy preset template
+        continue;
+      }
+      cleanedAllocations[pk as PeriodMonthKey] = alloc;
+      if (alloc.confirmedByUser) {
+        anyConfirmedBudget = true;
+        if (isLegacyDefaultTemplateAllocation(alloc)) {
+          hasLegacyConfirmed = true;
+        }
+      }
+    }
+  }
+
+  const hasExistingUserActivity =
+    (loaded.transactions && loaded.transactions.length > 0) ||
+    (loaded.snapshots && loaded.snapshots.length > 0) ||
+    anyConfirmedBudget;
+
+  const bankOnboardingCompleted =
+    typeof loaded.bankOnboardingCompleted === 'boolean'
+      ? loaded.bankOnboardingCompleted
+      : Boolean(hasExistingUserActivity);
+
+  return {
+    ...base,
+    ...loaded,
+    currentPeriodKey: currentMadridPeriod,
+    bankOnboardingCompleted,
+    bankConnectedChoice:
+      loaded.bankConnectedChoice ?? (bankOnboardingCompleted ? 'skipped' : 'pending'),
+    selectedHomeBankScope: loaded.selectedHomeBankScope ?? base.selectedHomeBankScope,
+    onboardingConfirmed: Boolean(cleanedAllocations[currentMadridPeriod]?.confirmedByUser),
+    hasLegacyTemplateBudget: hasLegacyConfirmed,
+    budgetScopeMode: loaded.budgetScopeMode ?? 'personal_only',
+    budgetSelectedAccountIds:
+      loaded.budgetSelectedAccountIds && loaded.budgetSelectedAccountIds.length > 0
+        ? loaded.budgetSelectedAccountIds
+        : base.budgetSelectedAccountIds,
+    budgetAllocations: cleanedAllocations,
+  };
+}
+
 export function loadActiveSession(): UserSession | null {
   try {
     const raw = localStorage.getItem(SESSION_STORAGE_KEY);
@@ -223,15 +315,20 @@ export function saveActiveSession(session: UserSession | null): void {
   localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
 }
 
-export function loadUserState(userId: string, displayName: string = 'Jared'): AppUserState {
+export function loadUserState(
+  userId: string,
+  displayName: string = 'Jared',
+  nowInstantUtc: string = new Date().toISOString()
+): AppUserState {
   try {
     const raw = localStorage.getItem(getUserStateStorageKey(userId));
     if (!raw) {
-      return createInitialUserState(userId, displayName);
+      return createInitialUserState(userId, displayName, nowInstantUtc);
     }
-    return JSON.parse(raw) as AppUserState;
+    const parsed = JSON.parse(raw) as Partial<AppUserState> & { userId: string };
+    return normalizeLoadedUserState(parsed, displayName, nowInstantUtc);
   } catch {
-    return createInitialUserState(userId, displayName);
+    return createInitialUserState(userId, displayName, nowInstantUtc);
   }
 }
 
@@ -257,6 +354,8 @@ export function saveDeviceOfflineQueue(queue: readonly OfflineQueuedExpense[]): 
   localStorage.setItem(OFFLINE_QUEUE_STORAGE_KEY, JSON.stringify(queue));
 }
 
-export function getTodayMadridCalendarDate(): CalendarDateISO {
-  return getMadridDateParts(new Date().toISOString()).calendarDate;
+export function getTodayMadridCalendarDate(
+  nowInstantUtc: string = new Date().toISOString()
+): CalendarDateISO {
+  return getMadridDateParts(nowInstantUtc).calendarDate;
 }

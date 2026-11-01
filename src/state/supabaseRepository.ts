@@ -21,7 +21,12 @@ import {
   enforceRowOwnership,
   requireAuthenticatedUser,
 } from '../server/security/rlsEnforcement';
-import { AppUserState, createInitialUserState } from './appStore';
+import {
+  AppUserState,
+  createInitialUserState,
+  isLegacyDefaultTemplateAllocation,
+  normalizeLoadedUserState,
+} from './appStore';
 
 /**
  * STOP SPEND — Real Supabase Postgres Persistence Repository (`src/state/supabaseRepository.ts`)
@@ -275,12 +280,10 @@ export async function fetchUserStateFromSupabase(
     mapDbRowToTransaction(row as DbCanonicalTransactionRow)
   );
 
-  const budgetAllocations: Record<PeriodMonthKey, BudgetPeriodAllocation> = {
-    ...baseState.budgetAllocations,
-  };
+  const budgetAllocations: Record<PeriodMonthKey, BudgetPeriodAllocation> = {};
   for (const b of budgetsRes.data ?? []) {
     const pk = String(b.period_key) as PeriodMonthKey;
-    budgetAllocations[pk] = createBudgetAllocation({
+    const alloc = createBudgetAllocation({
       id: String(b.id),
       userId: String(b.user_id),
       periodKey: pk,
@@ -291,6 +294,10 @@ export async function fetchUserStateFromSupabase(
       rolloverFromPreviousCents: Number(b.rollover_from_previous_cents ?? 0),
       manualAdjustmentsCents: Number(b.manual_adjustments_cents ?? 0),
     });
+    if (!alloc.confirmedByUser && isLegacyDefaultTemplateAllocation(alloc)) {
+      continue;
+    }
+    budgetAllocations[pk] = alloc;
   }
 
   const obligations: ObligationReservation[] = (obligationsRes.data ?? []).map((o) => ({
@@ -346,47 +353,67 @@ export async function fetchUserStateFromSupabase(
     createdAtUtc: String(e.created_at_utc),
   }));
 
-  const onboardingConfirmed =
-    Boolean(profileRes.data?.onboarding_confirmed) ||
-    Boolean(budgetAllocations[periodKey]?.confirmedByUser);
-
-  // Requirement #9: Keep Enable Banking visibly unconfigured unless real credentials & session exist!
+  const onboardingConfirmed = Boolean(budgetAllocations[periodKey]?.confirmedByUser);
   const bankConn = bankConnRes.data;
   const bankMode =
     bankConn?.environment_mode === 'sandbox' || bankConn?.environment_mode === 'production'
       ? bankConn.environment_mode
       : 'unconfigured';
 
-  return {
-    ...baseState,
-    userId,
-    displayName: String(profileRes.data?.display_name ?? displayNameFallback),
-    currentPeriodKey: periodKey,
-    onboardingConfirmed,
-    refundPolicy:
-      (profileRes.data?.refund_cross_period_policy as CrossPeriodRefundPolicy | undefined) ??
-      'CREDIT_CURRENT_PERIOD',
-    rememberedAccountId:
-      accounts.find((a) => a.type === 'bank')?.id ?? accounts[0]?.id ?? baseState.rememberedAccountId,
-    accounts,
-    snapshots,
-    sourceRecords,
-    transactions,
-    budgetAllocations,
-    obligations,
-    savingsReservations,
-    handledThresholds,
-    alertOutbox,
-    bankConfig: {
-      mode: bankMode,
-      hasValidSession: Boolean(bankConn?.has_valid_session),
-      hasSuccessfulRealRead: Boolean(bankConn?.has_successful_real_read),
-      localSyncPaused: Boolean(bankConn?.local_sync_paused),
-      sessionRevoked: bankConn?.status === 'session_revoked',
-      lastSyncUtc: bankConn?.last_sync_at ? String(bankConn.last_sync_at) : null,
-      lastSyncError: bankConn?.last_error_spanish ? String(bankConn.last_error_spanish) : null,
+  const isBankConnected =
+    bankMode !== 'unconfigured' &&
+    Boolean(bankConn?.has_valid_session) &&
+    Boolean(bankConn?.has_successful_real_read) &&
+    bankConn?.status !== 'session_revoked';
+
+  const hasExistingActivity =
+    transactions.length > 0 ||
+    snapshots.length > 0 ||
+    Object.values(budgetAllocations).some((a) => a.confirmedByUser) ||
+    isBankConnected ||
+    Boolean(profileRes.data?.onboarding_confirmed);
+
+  return normalizeLoadedUserState(
+    {
+      ...baseState,
+      userId,
+      displayName: String(profileRes.data?.display_name ?? displayNameFallback),
+      currentPeriodKey: periodKey,
+      bankOnboardingCompleted: hasExistingActivity,
+      bankConnectedChoice: isBankConnected
+        ? 'connected'
+        : hasExistingActivity
+          ? 'skipped'
+          : 'pending',
+      onboardingConfirmed,
+      refundPolicy:
+        (profileRes.data?.refund_cross_period_policy as CrossPeriodRefundPolicy | undefined) ??
+        'CREDIT_CURRENT_PERIOD',
+      rememberedAccountId:
+        accounts.find((a) => a.type === 'bank')?.id ??
+        accounts[0]?.id ??
+        baseState.rememberedAccountId,
+      accounts,
+      snapshots,
+      sourceRecords,
+      transactions,
+      budgetAllocations,
+      obligations,
+      savingsReservations,
+      handledThresholds,
+      alertOutbox,
+      bankConfig: {
+        mode: bankMode,
+        hasValidSession: Boolean(bankConn?.has_valid_session),
+        hasSuccessfulRealRead: Boolean(bankConn?.has_successful_real_read),
+        localSyncPaused: Boolean(bankConn?.local_sync_paused),
+        sessionRevoked: bankConn?.status === 'session_revoked',
+        lastSyncUtc: bankConn?.last_sync_at ? String(bankConn.last_sync_at) : null,
+        lastSyncError: bankConn?.last_error_spanish ? String(bankConn.last_error_spanish) : null,
+      },
     },
-  };
+    displayNameFallback
+  );
 }
 
 /**
