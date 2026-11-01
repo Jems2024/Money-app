@@ -1,14 +1,16 @@
 import { describe, it, expect } from 'vitest';
 import { SupabaseClient } from '@supabase/supabase-js';
 import {
+  deleteObligationFromSupabase,
   deleteTransactionFromSupabase,
   fetchUserStateFromSupabase,
   persistBudgetAllocationToSupabase,
+  persistObligationToSupabase,
   persistTransactionToSupabase,
   updateTransactionInSupabase,
 } from '../../src/state/supabaseRepository';
 import { calculatePersonalEnvelopes, createBudgetAllocation } from '../../src/domain/budgets';
-import { CanonicalTransaction } from '../../src/domain/ledger';
+import { CanonicalTransaction, ObligationReservation } from '../../src/domain/ledger';
 import { resolveBankConnectionStatusBadge } from '../../src/server/providers/enableBanking';
 import {
   SecurityAccessDeniedError,
@@ -32,6 +34,7 @@ function createRlsEnforcedMockSupabase() {
     alert_handled_thresholds: [],
     alert_outbox: [],
     bank_connections: [],
+    transaction_splits: [],
   };
 
   let currentAuthUserId: string | null = null;
@@ -115,20 +118,24 @@ function createRlsEnforcedMockSupabase() {
         },
         delete: () => {
           const delFilter: Array<{ col: string; val: unknown }> = [];
+          const executeDelete = () => {
+            tables[table] = rows.filter(
+              (r) =>
+                !(
+                  r.user_id === currentAuthUserId &&
+                  delFilter.every((f) => r[f.col] === f.val)
+                )
+            );
+            return { error: null };
+          };
           const delBuilder = {
             eq: (col: string, val: unknown) => {
               delFilter.push({ col, val });
-              if (delFilter.length >= 2) {
-                tables[table] = rows.filter(
-                  (r) =>
-                    !(
-                      r.user_id === currentAuthUserId &&
-                      delFilter.every((f) => r[f.col] === f.val)
-                    )
-                );
-                return Promise.resolve({ error: null });
-              }
+              executeDelete();
               return delBuilder;
+            },
+            then: (resolve: (res: { error: null }) => void) => {
+              resolve(executeDelete());
             },
           };
           return delBuilder;
@@ -304,5 +311,118 @@ describe('Supabase Persistence, Reload, Edit/Undo, Budget Math & RLS Isolation (
     });
     const afterUndoState = await fetchUserStateFromSupabase(jaredClientAgain, USER_JARED, 'Jared');
     expect(afterUndoState.transactions).toHaveLength(0);
+
+    // 9. Splits Persistence & Restoration
+    const splitTx: CanonicalTransaction = {
+      id: 'tx_with_splits_01',
+      userId: USER_JARED,
+      accountId: bankAccount.id,
+      type: 'expense',
+      status: 'booked',
+      amountCents: -2500,
+      currency: 'EUR',
+      bookingDate: initialState.currentPeriodKey + '-10' as any,
+      valueDate: null,
+      occurredAtUtc: new Date().toISOString(),
+      createdAtUtc: new Date().toISOString(),
+      description: 'Compra mixta hipermercado',
+      merchantNormalized: 'HIPERMERCADO',
+      userNote: 'Separando comida de herramientas',
+      categoryId: 'groceries',
+      categorySource: 'user_locked',
+      categoryConfidence: 100,
+      categoryExplanation: 'Dividido manualmente',
+      scope: 'mixed',
+      smallSpendingTagged: false,
+      splits: [
+        {
+          id: 'split_01',
+          label: 'Alimentación familiar',
+          amountCents: 1800,
+          categoryId: 'groceries',
+          scope: 'personal',
+          smallSpendingTagged: false,
+        },
+        {
+          id: 'split_02',
+          label: 'Material de trabajo autónomo',
+          amountCents: 700,
+          categoryId: 'work_tools',
+          scope: 'non_personal',
+          smallSpendingTagged: false,
+        },
+      ],
+      linkedExpenseId: null,
+      transferPairId: null,
+      counterpartAccountId: null,
+      untrackedOwnedDestinationLabel: null,
+      settledObligationId: null,
+      consumedSavingsReservationId: null,
+      supersededByTransactionId: null,
+      reviewStatus: 'none',
+      sourceRecordIds: [],
+    };
+
+    await persistTransactionToSupabase({
+      client: jaredClientAgain,
+      authenticatedUserId: USER_JARED,
+      transaction: splitTx,
+      targetAccount: bankAccount,
+    });
+
+    const stateWithSplits = await fetchUserStateFromSupabase(jaredClientAgain, USER_JARED, 'Jared');
+    expect(stateWithSplits.transactions).toHaveLength(1);
+    expect(stateWithSplits.transactions[0]!.splits).toHaveLength(2);
+    expect(stateWithSplits.transactions[0]!.splits[0]!.label).toBe('Alimentación familiar');
+    expect(stateWithSplits.transactions[0]!.splits[0]!.amountCents).toBe(1800);
+    expect(stateWithSplits.transactions[0]!.splits[1]!.scope).toBe('non_personal');
+
+    // 10. Obligations Persistence & Deletion
+    const obligation: ObligationReservation = {
+      id: 'ob_internet_nov',
+      userId: USER_JARED,
+      name: 'Fibra óptica Digi',
+      periodKey: initialState.currentPeriodKey,
+      expectedAmountCents: 3000,
+      paidAmountCents: 0,
+      status: 'reserved',
+      dueDate: (initialState.currentPeriodKey + '-20') as any,
+      settledTransactionIds: [],
+    };
+
+    await persistObligationToSupabase({
+      client: jaredClientAgain,
+      authenticatedUserId: USER_JARED,
+      obligation,
+    });
+
+    const stateWithOb = await fetchUserStateFromSupabase(jaredClientAgain, USER_JARED, 'Jared');
+    expect(stateWithOb.obligations.some((o) => o.id === 'ob_internet_nov')).toBe(true);
+
+    await deleteObligationFromSupabase({
+      client: jaredClientAgain,
+      authenticatedUserId: USER_JARED,
+      obligationId: 'ob_internet_nov',
+    });
+
+    const stateAfterDelOb = await fetchUserStateFromSupabase(jaredClientAgain, USER_JARED, 'Jared');
+    expect(stateAfterDelOb.obligations.some((o) => o.id === 'ob_internet_nov')).toBe(false);
+
+    // 11. Error handling: Throws on DB query failure instead of replacing valid data with empty arrays
+    const failingClient = {
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            order: () => Promise.resolve({ data: null, error: { message: 'DB connection failure' } }),
+            maybeSingle: () => Promise.resolve({ data: null, error: { message: 'DB connection failure' } }),
+            then: (res: any) => res({ data: null, error: { message: 'DB connection failure' } }),
+          }),
+        }),
+      }),
+    } as unknown as SupabaseClient;
+
+    await expect(
+      fetchUserStateFromSupabase(failingClient, USER_JARED, 'Jared')
+    ).rejects.toThrow('Error en consulta Supabase');
   });
 });

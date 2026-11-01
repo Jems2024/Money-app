@@ -8,6 +8,7 @@ import {
   ObligationReservation,
   SavingsReservation,
   SourceRecord,
+  TransactionSplit,
 } from '../domain/ledger';
 import {
   BudgetPeriodAllocation,
@@ -173,6 +174,7 @@ export async function fetchUserStateFromSupabase(
     snapshotsRes,
     sourcesRes,
     txsRes,
+    splitsRes,
     budgetsRes,
     obligationsRes,
     savingsRes,
@@ -189,6 +191,7 @@ export async function fetchUserStateFromSupabase(
       .select('*')
       .eq('user_id', userId)
       .order('created_at_utc', { ascending: false }),
+    client.from('transaction_splits').select('*').eq('user_id', userId),
     client.from('budget_allocations').select('*').eq('user_id', userId),
     client.from('obligations').select('*').eq('user_id', userId),
     client.from('savings_reservations').select('*').eq('user_id', userId),
@@ -196,6 +199,25 @@ export async function fetchUserStateFromSupabase(
     client.from('alert_outbox').select('*').eq('user_id', userId).order('created_at_utc', { ascending: true }),
     client.from('bank_connections').select('*').eq('user_id', userId).maybeSingle(),
   ]);
+
+  // Robust error checking: NEVER swallow errors and wipe valid local state with empty arrays!
+  const criticalQueries = [
+    { name: 'profiles', res: profileRes },
+    { name: 'accounts', res: accountsRes },
+    { name: 'balance_snapshots', res: snapshotsRes },
+    { name: 'source_records', res: sourcesRes },
+    { name: 'canonical_transactions', res: txsRes },
+    { name: 'transaction_splits', res: splitsRes },
+    { name: 'budget_allocations', res: budgetsRes },
+    { name: 'obligations', res: obligationsRes },
+    { name: 'savings_reservations', res: savingsRes },
+    { name: 'bank_connections', res: bankConnRes },
+  ];
+  for (const q of criticalQueries) {
+    if (q.res.error) {
+      throw new Error(`Error en consulta Supabase [${q.name}]: ${q.res.error.message}`);
+    }
+  }
 
   // Provision initial profile and empty accounts if not yet present in DB
   let accounts: Account[] = [];
@@ -276,9 +298,40 @@ export async function fetchUserStateFromSupabase(
     provenance: String(sr.provenance),
   }));
 
-  const transactions: CanonicalTransaction[] = (txsRes.data ?? []).map((row) =>
-    mapDbRowToTransaction(row as DbCanonicalTransactionRow)
-  );
+  const splitsByTxId: Record<string, TransactionSplit[]> = {};
+  for (const s of splitsRes.data ?? []) {
+    const txId = String(s.transaction_id);
+    if (!splitsByTxId[txId]) splitsByTxId[txId] = [];
+    splitsByTxId[txId]!.push({
+      id: String(s.id),
+      label: String(s.label),
+      amountCents: Number(s.amount_cents),
+      categoryId: String(s.category_id),
+      scope: s.scope as 'personal' | 'non_personal',
+      smallSpendingTagged: Boolean(s.small_spending_tagged),
+    });
+  }
+
+  const sourceRecordIdsByTxId: Record<string, string[]> = {};
+  for (const sr of sourceRecords) {
+    for (const txRow of txsRes.data ?? []) {
+      const txId = String(txRow.id);
+      const bareTxId = txId.replace(/^tx_/, '');
+      if (bareTxId && sr.id.includes(bareTxId)) {
+        if (!sourceRecordIdsByTxId[txId]) {
+          sourceRecordIdsByTxId[txId] = [];
+        }
+        sourceRecordIdsByTxId[txId]!.push(sr.id);
+      }
+    }
+  }
+
+  const transactions: CanonicalTransaction[] = (txsRes.data ?? []).map((row) => {
+    const tx = mapDbRowToTransaction(row as DbCanonicalTransactionRow);
+    tx.splits = splitsByTxId[tx.id] ?? [];
+    tx.sourceRecordIds = sourceRecordIdsByTxId[tx.id] ?? [];
+    return tx;
+  });
 
   const budgetAllocations: Record<PeriodMonthKey, BudgetPeriodAllocation> = {};
   for (const b of budgetsRes.data ?? []) {
@@ -440,6 +493,32 @@ export async function persistTransactionToSupabase(params: {
     throw new Error(`Error al guardar movimiento en Supabase: ${txErr.message}`);
   }
 
+  // Persist transaction splits if present
+  await params.client
+    .from('transaction_splits')
+    .delete()
+    .eq('transaction_id', params.transaction.id)
+    .eq('user_id', params.authenticatedUserId);
+
+  if (params.transaction.splits && params.transaction.splits.length > 0) {
+    const splitRows = params.transaction.splits.map((split) => ({
+      id: split.id,
+      user_id: params.authenticatedUserId,
+      transaction_id: params.transaction.id,
+      label: split.label,
+      amount_cents: split.amountCents,
+      category_id: split.categoryId,
+      scope: split.scope,
+      small_spending_tagged: split.smallSpendingTagged,
+    }));
+    const { error: splitErr } = await params.client
+      .from('transaction_splits')
+      .upsert(splitRows, { onConflict: 'id' });
+    if (splitErr) {
+      throw new Error(`Error al guardar divisiones de gasto en Supabase: ${splitErr.message}`);
+    }
+  }
+
   if (params.newHandledThresholds && params.newHandledThresholds.length > 0) {
     await params.client.from('alert_handled_thresholds').upsert(
       params.newHandledThresholds.map((h) => ({
@@ -519,6 +598,12 @@ export async function deleteTransactionFromSupabase(params: {
 }): Promise<void> {
   enforceRowOwnership(params.authenticatedUserId, params.transaction, 'movimiento');
 
+  await params.client
+    .from('transaction_splits')
+    .delete()
+    .eq('transaction_id', params.transaction.id)
+    .eq('user_id', params.authenticatedUserId);
+
   const { error } = await params.client
     .from('canonical_transactions')
     .delete()
@@ -527,6 +612,54 @@ export async function deleteTransactionFromSupabase(params: {
 
   if (error) {
     throw new Error(`Error al deshacer movimiento en Supabase: ${error.message}`);
+  }
+}
+
+/**
+ * Persists a planned bill / obligation reservation to Supabase Postgres.
+ */
+export async function persistObligationToSupabase(params: {
+  client: SupabaseClient;
+  authenticatedUserId: string;
+  obligation: ObligationReservation;
+}): Promise<void> {
+  enforceRowOwnership(params.authenticatedUserId, params.obligation, 'obligación');
+
+  const { error } = await params.client.from('obligations').upsert(
+    {
+      id: params.obligation.id,
+      user_id: params.authenticatedUserId,
+      name: params.obligation.name,
+      period_key: params.obligation.periodKey,
+      expected_amount_cents: params.obligation.expectedAmountCents,
+      paid_amount_cents: params.obligation.paidAmountCents,
+      status: params.obligation.status,
+      due_date: params.obligation.dueDate,
+    },
+    { onConflict: 'id' }
+  );
+
+  if (error) {
+    throw new Error(`Error al guardar factura/obligación en Supabase: ${error.message}`);
+  }
+}
+
+/**
+ * Deletes a planned bill / obligation from Supabase Postgres.
+ */
+export async function deleteObligationFromSupabase(params: {
+  client: SupabaseClient;
+  authenticatedUserId: string;
+  obligationId: string;
+}): Promise<void> {
+  const { error } = await params.client
+    .from('obligations')
+    .delete()
+    .eq('id', params.obligationId)
+    .eq('user_id', params.authenticatedUserId);
+
+  if (error) {
+    throw new Error(`Error al eliminar factura/obligación en Supabase: ${error.message}`);
   }
 }
 

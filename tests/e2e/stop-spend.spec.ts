@@ -119,9 +119,8 @@ test.describe('STOP SPEND — Redesigned Bank-First & Financial Reports E2E Flow
     await page.getByTestId('csv-commit-button').click();
     await expect(page.getByText('MERCADONA VALENCIA')).toBeVisible();
 
-    // 8. Offline Mode resilience
-    await page.getByTestId('nav-tab-ajustes').click();
-    await page.getByTestId('toggle-simulate-offline-btn').click();
+    // 8. Offline Mode resilience (Native browser offline network simulation)
+    await page.context().setOffline(true);
     await expect(page.getByTestId('offline-badge')).toContainText('Sin conexión');
 
     await page.getByTestId('nav-tab-inicio').click();
@@ -132,6 +131,7 @@ test.describe('STOP SPEND — Redesigned Bank-First & Financial Reports E2E Flow
     await expect(page.getByTestId('toast-banner')).toContainText('Pendiente de sincronizar');
 
     // Reconnect and flush
+    await page.context().setOffline(false);
     await page.getByTestId('nav-tab-ajustes').click();
     await expect(page.getByTestId('offline-queue-panel')).toContainText('1 gasto(s) Pendiente');
     await page.getByTestId('flush-offline-queue-btn').click();

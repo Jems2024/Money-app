@@ -77,7 +77,6 @@ import {
   createInitialUserState,
   getTodayMadridCalendarDate,
   isLegacyDefaultTemplateAllocation,
-  KNOWN_SUPABASE_PROJECT_REF,
   loadActiveSession,
   loadDeviceOfflineQueue,
   loadUserState,
@@ -88,9 +87,11 @@ import {
   UserSession,
 } from './state/appStore';
 import {
+  deleteObligationFromSupabase,
   deleteTransactionFromSupabase,
   fetchUserStateFromSupabase,
   persistBudgetAllocationToSupabase,
+  persistObligationToSupabase,
   persistTransactionToSupabase,
   updateTransactionInSupabase,
 } from './state/supabaseRepository';
@@ -131,6 +132,22 @@ export const App: React.FC = () => {
   const [offlineQueue, setOfflineQueue] = useState<OfflineQueuedExpense[]>(() =>
     loadDeviceOfflineQueue()
   );
+  const [isOnline, setIsOnline] = useState<boolean>(() =>
+    typeof navigator !== 'undefined' ? navigator.onLine : true
+  );
+
+  useEffect(() => {
+    const handleOnline = () => {
+      setIsOnline(true);
+    };
+    const handleOffline = () => setIsOnline(false);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
 
   // 3. Navigation & Selected Month (defaults dynamically to current Europe/Madrid month!)
   const [activeTab, setActiveTab] = useState<ActiveTab>('inicio');
@@ -179,7 +196,7 @@ export const App: React.FC = () => {
   const [csvDateFormat, setCsvDateFormat] = useState<'DD/MM/YYYY' | 'YYYY-MM-DD'>(
     'DD/MM/YYYY'
   );
-  const [csvTargetAccountId, setCsvTargetAccountId] = useState('acc_bank_caixabank');
+  const [csvTargetAccountId, setCsvTargetAccountId] = useState('');
 
   // Advanced / Optional Cash & Obligations Inputs
   const [cashIncomeAmountInput, setCashIncomeAmountInput] = useState('');
@@ -432,6 +449,22 @@ export const App: React.FC = () => {
     [appState.accounts]
   );
 
+  const primaryBankAccount = useMemo(
+    () => ownedBankAccounts[0] ?? appState.accounts.find((a) => a.type === 'bank') ?? appState.accounts[0],
+    [ownedBankAccounts, appState.accounts]
+  );
+
+  const primaryCashAccount = useMemo(
+    () => appState.accounts.find((a) => a.isOwned && a.type === 'cash') ?? appState.accounts[0],
+    [appState.accounts]
+  );
+
+  useEffect(() => {
+    if (!csvTargetAccountId && primaryBankAccount) {
+      setCsvTargetAccountId(primaryBankAccount.id);
+    }
+  }, [primaryBankAccount, csvTargetAccountId]);
+
   // Recent 5 transactions for Home
   const recentFiveTransactions = useMemo(() => {
     return [...appState.transactions]
@@ -532,55 +565,53 @@ export const App: React.FC = () => {
     setSession(newSession);
   };
 
-  // Requirement 1: Bank-First Onboarding Actions
-  const handleConnectMyBankClick = () => {
-    if (appState.bankConfig.mode === 'unconfigured') {
+  // Requirement 1: Bank-First Onboarding Actions (Real Enable Banking Integration)
+  const handleConnectMyBankClick = async () => {
+    if (appState.bankConfig.mode === 'unconfigured' && (!supabaseClient || !session)) {
       setShowUnconfiguredBankMessage(true);
       return;
     }
 
-    // When configured in sandbox/production, initiate bank authorization & initial fetch
-    const nowIso = new Date().toISOString();
-    const todayDate = getTodayMadridCalendarDate(nowIso);
-    setAppState((prev) => {
-      const hasBankSnap = prev.snapshots.some(
-        (s) => s.accountId === 'acc_bank_caixabank' && s.source === 'provider'
-      );
-      return {
-        ...prev,
-        bankOnboardingCompleted: true,
-        bankConnectedChoice: 'connected',
-        bankConfig: {
-          ...prev.bankConfig,
-          hasValidSession: true,
-          hasSuccessfulRealRead: true,
-          sessionRevoked: false,
-          lastSyncUtc: nowIso,
-          lastSyncError: null,
-        },
-        snapshots: hasBankSnap
-          ? prev.snapshots
-          : [
-              {
-                id: `snap_provider_${Date.now()}`,
-                userId: prev.userId,
-                accountId: 'acc_bank_caixabank',
-                source: 'provider',
-                balanceType: 'ITAV',
-                amountCents: 185040, // Only used when sandbox/production provider returns initial read
-                currency: 'EUR',
-                referenceTimeUtc: nowIso,
-                referenceBookingDate: todayDate,
-                includesPendingDebits: true,
-              },
-              ...prev.snapshots,
-            ],
-      };
-    });
-    setToastMessage({
-      text: 'Conexión con CaixaBank autorizada y saldos actualizados.',
-      type: 'success',
-    });
+    setIsRefreshingBank(true);
+    try {
+      if (!supabaseClient || !session) {
+        setToastMessage({
+          text: 'Inicia sesión para conectar tu cuenta de CaixaBank.',
+          type: 'error',
+        });
+        return;
+      }
+
+      const { data, error } = await supabaseClient.functions.invoke('bank-auth', {
+        body: {},
+      });
+
+      if (error || !data) {
+        setShowUnconfiguredBankMessage(true);
+        setToastMessage({
+          text: 'La conexión bancaria todavía no está disponible.',
+          type: 'warning',
+        });
+        return;
+      }
+
+      if (data.authorizationUrl) {
+        // Official bank PSD2 authorization redirection
+        window.location.href = data.authorizationUrl;
+        return;
+      }
+
+      if (data.error === 'PROVIDER_UNCONFIGURED') {
+        setShowUnconfiguredBankMessage(true);
+        return;
+      }
+
+      setShowUnconfiguredBankMessage(true);
+    } catch {
+      setShowUnconfiguredBankMessage(true);
+    } finally {
+      setIsRefreshingBank(false);
+    }
   };
 
   const handleContinueWithoutBank = () => {
@@ -592,48 +623,88 @@ export const App: React.FC = () => {
     }));
   };
 
-  const handleRefreshBankBalance = () => {
+  const handleRefreshBankBalance = async () => {
     setIsRefreshingBank(true);
-    setTimeout(() => {
-      setIsRefreshingBank(false);
-      if (appState.bankConfig.mode === 'unconfigured') {
+    try {
+      if (!supabaseClient || !session) {
         setToastMessage({
-          text: 'La conexión bancaria todavía no está disponible. Configura Enable Banking en Ajustes.',
-          type: 'warning',
-        });
-        return;
-      }
-      if (appState.simulateNetworkOffline || appState.simulateNextApiError) {
-        setAppState((prev) => ({
-          ...prev,
-          simulateNextApiError: false,
-          bankConfig: {
-            ...prev.bankConfig,
-            lastSyncError:
-              'No se pudo contactar con CaixaBank (Enable Banking). Mostrando el último saldo conocido.',
-          },
-        }));
-        setToastMessage({
-          text: 'Fallo al sincronizar con el banco. Se mantiene el último saldo conocido marcado como desactualizado.',
+          text: 'No pudimos actualizar tu saldo. Inténtalo de nuevo.',
           type: 'error',
         });
         return;
       }
 
-      const nowIso = new Date().toISOString();
+      const { data, error } = await supabaseClient.functions.invoke('bank-sync', {
+        body: {},
+      });
+
+      if (error || !data?.success) {
+        const errorMsg = data?.messageSpanish || 'No pudimos actualizar tu saldo. Inténtalo de nuevo.';
+        setAppState((prev) => ({
+          ...prev,
+          bankConfig: {
+            ...prev.bankConfig,
+            lastSyncError: errorMsg,
+          },
+        }));
+        setToastMessage({
+          text: errorMsg,
+          type: 'error',
+        });
+        return;
+      }
+
+      const freshState = await fetchUserStateFromSupabase(
+        supabaseClient,
+        session.userId,
+        session.displayName
+      );
+      setAppState(freshState);
+      saveUserState(freshState);
+
+      setToastMessage({
+        text: 'Saldo y movimientos actualizados.',
+        type: 'success',
+      });
+    } catch {
       setAppState((prev) => ({
         ...prev,
         bankConfig: {
           ...prev.bankConfig,
-          lastSyncUtc: nowIso,
-          lastSyncError: null,
+          lastSyncError: 'No pudimos contactar con el banco.',
         },
       }));
       setToastMessage({
-        text: 'Saldo y movimientos bancarios actualizados.',
-        type: 'success',
+        text: 'No pudimos actualizar tu saldo. Inténtalo de nuevo.',
+        type: 'error',
       });
-    }, 150);
+    } finally {
+      setIsRefreshingBank(false);
+    }
+  };
+
+  const handleDisconnectBank = async () => {
+    try {
+      if (supabaseClient && session) {
+        await supabaseClient.functions.invoke('bank-auth', {
+          body: { action: 'disconnect' },
+        });
+      }
+    } catch {
+      // Proceed with local update
+    }
+    setAppState((prev) => ({
+      ...prev,
+      bankConfig: {
+        ...prev.bankConfig,
+        hasValidSession: false,
+        sessionRevoked: true,
+      },
+    }));
+    setToastMessage({
+      text: 'Sesión bancaria eliminada en el proveedor.',
+      type: 'warning',
+    });
   };
 
   // Requirement 2B: Save Monthly Budget (Does NOT alter bank balance!)
@@ -779,16 +850,7 @@ export const App: React.FC = () => {
     smallSpendingTagged: boolean;
     userNote: string | null;
   }) => {
-    if (appState.simulateNextApiError) {
-      setAppState((prev) => ({ ...prev, simulateNextApiError: false }));
-      setToastMessage({
-        text: 'Error de servidor simulado al guardar. Puedes reintentar o activar la cola sin conexión.',
-        type: 'error',
-      });
-      return;
-    }
-
-    if (appState.simulateNetworkOffline) {
+    if (!isOnline) {
       const clientIdempotencyKey = `idem_${Date.now()}`;
       const nextQueue = enqueueOfflineExpense({
         queue: offlineQueue,
@@ -927,7 +989,6 @@ export const App: React.FC = () => {
       const alertEval = evaluateThresholdsAfterSpendChange(prev, res.transactions, false);
       return {
         ...prev,
-        simulateNetworkOffline: false,
         transactions: res.transactions,
         handledThresholds: alertEval.handledThresholds,
         alertOutbox: alertEval.alertOutbox,
@@ -1187,7 +1248,7 @@ export const App: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-1.5">
-          {appState.simulateNetworkOffline && (
+          {!isOnline && (
             <span
               data-testid="offline-badge"
               className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-amber-950 border border-amber-700 text-[11px] font-semibold text-amber-200"
@@ -2271,6 +2332,13 @@ export const App: React.FC = () => {
                         ...prev,
                         obligations: [...prev.obligations, ob],
                       }));
+                      if (supabaseClient && session) {
+                        persistObligationToSupabase({
+                          client: supabaseClient,
+                          authenticatedUserId: session.userId,
+                          obligation: ob,
+                        }).catch(() => {});
+                      }
                       setNewObligationName('');
                       setNewObligationAmount('');
                     } catch (e) {
@@ -2305,63 +2373,86 @@ export const App: React.FC = () => {
                             {formatEur(ob.expectedAmountCents)}
                           </span>
                         </div>
-                        {remaining > 0 && (
+                        <div className="flex items-center gap-2">
+                          {remaining > 0 && (
+                            <button
+                              type="button"
+                              data-testid={`pay-obligation-${ob.id}`}
+                              onClick={() => {
+                                const payTx: CanonicalTransaction = {
+                                  id: `tx_ob_pay_${Date.now()}`,
+                                  userId: appState.userId,
+                                  accountId: primaryBankAccount?.id ?? 'acc_bank_caixabank',
+                                  type: 'expense',
+                                  status: 'booked',
+                                  amountCents: -remaining,
+                                  currency: 'EUR',
+                                  bookingDate: getTodayMadridCalendarDate(),
+                                  valueDate: getTodayMadridCalendarDate(),
+                                  occurredAtUtc: new Date().toISOString(),
+                                  createdAtUtc: new Date().toISOString(),
+                                  description: `Pago recibo: ${ob.name}`,
+                                  merchantNormalized: ob.name.toUpperCase(),
+                                  userNote: null,
+                                  categoryId: 'housing_bills',
+                                  categorySource: 'user_locked',
+                                  categoryConfidence: 100,
+                                  categoryExplanation: 'Pago de recibo previsto',
+                                  scope: 'non_personal',
+                                  smallSpendingTagged: false,
+                                  splits: [],
+                                  linkedExpenseId: null,
+                                  transferPairId: null,
+                                  counterpartAccountId: null,
+                                  untrackedOwnedDestinationLabel: null,
+                                  settledObligationId: ob.id,
+                                  consumedSavingsReservationId: null,
+                                  supersededByTransactionId: null,
+                                  reviewStatus: 'none',
+                                  sourceRecordIds: [],
+                                };
+                                const settled = settleObligationWithPayment({
+                                  obligation: ob,
+                                  paymentTransaction: payTx,
+                                });
+                                setAppState((prev) => ({
+                                  ...prev,
+                                  transactions: [
+                                    settled.updatedTransaction,
+                                    ...prev.transactions,
+                                  ],
+                                  obligations: prev.obligations.map((x) =>
+                                    x.id === ob.id ? settled.updatedObligation : x
+                                  ),
+                                }));
+                              }}
+                              className="min-h-[36px] px-3 rounded-lg bg-emerald-600 text-white font-semibold"
+                            >
+                              Marcar pagado
+                            </button>
+                          )}
                           <button
                             type="button"
-                            data-testid={`pay-obligation-${ob.id}`}
+                            data-testid={`delete-obligation-${ob.id}`}
                             onClick={() => {
-                              const payTx: CanonicalTransaction = {
-                                id: `tx_ob_pay_${Date.now()}`,
-                                userId: appState.userId,
-                                accountId: 'acc_bank_caixabank',
-                                type: 'expense',
-                                status: 'booked',
-                                amountCents: -remaining,
-                                currency: 'EUR',
-                                bookingDate: getTodayMadridCalendarDate(),
-                                valueDate: getTodayMadridCalendarDate(),
-                                occurredAtUtc: new Date().toISOString(),
-                                createdAtUtc: new Date().toISOString(),
-                                description: `Pago recibo: ${ob.name}`,
-                                merchantNormalized: ob.name.toUpperCase(),
-                                userNote: null,
-                                categoryId: 'housing_bills',
-                                categorySource: 'user_locked',
-                                categoryConfidence: 100,
-                                categoryExplanation: 'Pago de recibo previsto',
-                                scope: 'non_personal',
-                                smallSpendingTagged: false,
-                                splits: [],
-                                linkedExpenseId: null,
-                                transferPairId: null,
-                                counterpartAccountId: null,
-                                untrackedOwnedDestinationLabel: null,
-                                settledObligationId: ob.id,
-                                consumedSavingsReservationId: null,
-                                supersededByTransactionId: null,
-                                reviewStatus: 'none',
-                                sourceRecordIds: [],
-                              };
-                              const settled = settleObligationWithPayment({
-                                obligation: ob,
-                                paymentTransaction: payTx,
-                              });
                               setAppState((prev) => ({
                                 ...prev,
-                                transactions: [
-                                  settled.updatedTransaction,
-                                  ...prev.transactions,
-                                ],
-                                obligations: prev.obligations.map((x) =>
-                                  x.id === ob.id ? settled.updatedObligation : x
-                                ),
+                                obligations: prev.obligations.filter((x) => x.id !== ob.id),
                               }));
+                              if (supabaseClient && session) {
+                                deleteObligationFromSupabase({
+                                  client: supabaseClient,
+                                  authenticatedUserId: session.userId,
+                                  obligationId: ob.id,
+                                }).catch(() => {});
+                              }
                             }}
-                            className="min-h-[36px] px-3 rounded-lg bg-emerald-600 text-white font-semibold"
+                            className="min-h-[36px] px-2.5 rounded-lg bg-slate-800 hover:bg-rose-950 text-slate-400 hover:text-rose-300"
+                            title="Eliminar recibo previsto"
                           >
-                            Marcar pagado
+                            Eliminar
                           </button>
-                        )}
+                        </div>
                       </div>
                     );
                   })}
@@ -2388,7 +2479,7 @@ export const App: React.FC = () => {
                       const cashTx: CanonicalTransaction = {
                         id: `tx_cash_inc_${Date.now()}`,
                         userId: appState.userId,
-                        accountId: 'acc_cash_main',
+                        accountId: primaryCashAccount?.id ?? 'acc_cash_main',
                         type: 'income',
                         status: 'booked',
                         amountCents: cents,
@@ -2807,7 +2898,7 @@ export const App: React.FC = () => {
            ==================================================================== */}
         {activeTab === 'ajustes' && (
           <div className="space-y-4">
-            {/* 1. Banking Connection: CaixaBank via Enable Banking */}
+            {/* 1. Banking Connection: CaixaBank */}
             <section
               data-testid="settings-bank-connection-card"
               className="rounded-2xl bg-slate-900 border border-slate-800 p-4 space-y-3"
@@ -2818,7 +2909,7 @@ export const App: React.FC = () => {
                     Integración PSD2 de solo lectura
                   </span>
                   <h2 className="text-base font-bold text-slate-100">
-                    Conexión CaixaBank (Enable Banking)
+                    Conexión CaixaBank
                   </h2>
                 </div>
                 <span className="text-xs font-mono px-2.5 py-1 rounded-lg bg-slate-950 border border-slate-800 text-slate-300">
@@ -2828,136 +2919,79 @@ export const App: React.FC = () => {
 
               <p className="text-xs text-slate-300">{bankStatusBadge.descriptionSpanish}</p>
 
+              {appState.bankConfig.lastSyncUtc && (
+                <p className="text-xs text-slate-400">
+                  Última sincronización:{' '}
+                  {new Date(appState.bankConfig.lastSyncUtc).toLocaleString('es-ES', {
+                    timeZone: 'Europe/Madrid',
+                  })}
+                </p>
+              )}
+
               {appState.bankConfig.mode === 'unconfigured' && (
-                <div className="rounded-xl bg-amber-950/40 border border-amber-700/60 p-3 text-xs text-amber-100 space-y-1.5">
+                <div className="rounded-xl bg-amber-950/40 border border-amber-700/60 p-3 text-xs text-amber-100 space-y-1">
                   <p className="font-bold text-amber-200">
                     La conexión bancaria todavía no está disponible.
                   </p>
-                  <p>
-                    Para activar la lectura automática de CaixaBank sin compartir nunca tus claves bancarias:
+                  <p className="text-amber-100/90">
+                    Puedes continuar registrando tus gastos manualmente en efectivo o importando un extracto bancario en CSV.
                   </p>
-                  <ol className="list-decimal list-inside space-y-1 text-amber-100/90">
-                    <li>
-                      Vincula tu cuenta propia de CaixaBank en el panel de Enable Banking (<em>Restricted personal use</em>).
-                    </li>
-                    <li>
-                      Configura en Supabase Secrets las credenciales del proveedor (App ID, clave privada RSA y URI de redirección).
-                    </li>
-                    <li>
-                      Despliega las funciones <code>bank-auth</code>, <code>bank-callback</code> y <code>bank-sync</code>.
-                    </li>
-                  </ol>
                 </div>
               )}
 
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={() =>
-                    setAppState((prev) => ({
-                      ...prev,
-                      bankConfig: {
-                        ...prev.bankConfig,
-                        localSyncPaused: !prev.bankConfig.localSyncPaused,
-                      },
-                    }))
-                  }
-                  className="min-h-[40px] px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs text-slate-200"
-                >
-                  {appState.bankConfig.localSyncPaused
-                    ? 'Reanudar sincronización local'
-                    : 'Pausar sincronización local'}
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() =>
-                    setAppState((prev) => ({
-                      ...prev,
-                      bankConfig: {
-                        ...prev.bankConfig,
-                        hasValidSession: false,
-                        sessionRevoked: true,
-                      },
-                    }))
-                  }
-                  className="min-h-[40px] px-3 rounded-xl bg-rose-950/70 hover:bg-rose-900 border border-rose-700/60 text-xs text-rose-200"
-                >
-                  Eliminar sesión en proveedor (DELETE /sessions)
-                </button>
+              <div className="flex flex-wrap gap-2 pt-1">
+                {appState.bankConfig.hasValidSession ? (
+                  <>
+                    <button
+                      type="button"
+                      disabled={isRefreshingBank}
+                      onClick={handleRefreshBankBalance}
+                      className="min-h-[40px] px-3.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-xs font-bold text-white flex items-center gap-1.5"
+                    >
+                      <RefreshCw
+                        className={`w-3.5 h-3.5 ${isRefreshingBank ? 'animate-spin' : ''}`}
+                      />
+                      <span>{isRefreshingBank ? 'Actualizando...' : 'Actualizar saldo ahora'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleDisconnectBank}
+                      className="min-h-[40px] px-3 rounded-xl bg-rose-950/70 hover:bg-rose-900 border border-rose-700/60 text-xs text-rose-200"
+                    >
+                      Desconectar mi banco
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={isRefreshingBank}
+                    onClick={handleConnectMyBankClick}
+                    className="min-h-[40px] px-3.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-xs font-bold text-white flex items-center gap-1.5"
+                  >
+                    <Building2 className="w-3.5 h-3.5" />
+                    <span>Conectar mi banco</span>
+                  </button>
+                )}
               </div>
             </section>
 
-            {/* 2. Supabase Persistence Status */}
-            <section className="rounded-2xl bg-slate-900 border border-slate-800 p-4 space-y-2">
-              <div className="flex items-start justify-between gap-2">
-                <div>
-                  <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-400">
-                    Base de datos y Autenticación
-                  </span>
-                  <h3 className="text-sm font-bold text-slate-100">
-                    Proyecto Supabase: STOP SPEND ({KNOWN_SUPABASE_PROJECT_REF})
-                  </h3>
-                </div>
-                <span className="text-xs font-mono px-2.5 py-1 rounded-lg bg-slate-950 border border-slate-800 text-slate-300">
-                  {supabaseClient ? 'Supabase Conectado' : 'Pendiente de clave pública'}
-                </span>
-              </div>
-              <p className="text-xs text-slate-400">
-                URL: <code className="text-slate-200">https://{KNOWN_SUPABASE_PROJECT_REF}.supabase.co</code>
-              </p>
-            </section>
-
-            {/* 3. Offline Queue & API Error Recovery Controls */}
+            {/* 2. Offline Queue & Resiliency */}
             <section className="rounded-2xl bg-slate-900 border border-slate-800 p-4 space-y-3">
               <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
                 <Wifi className="w-4 h-4 text-emerald-400" />
-                <span>Cola sin conexión (Offline) y resiliencia</span>
+                <span>Cola sin conexión y sincronización</span>
               </h3>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
-                <button
-                  type="button"
-                  data-testid="toggle-simulate-offline-btn"
-                  onClick={() =>
-                    setAppState((prev) => ({
-                      ...prev,
-                      simulateNetworkOffline: !prev.simulateNetworkOffline,
-                    }))
-                  }
-                  className={`min-h-[44px] px-3 rounded-xl border font-semibold flex items-center justify-between ${
-                    appState.simulateNetworkOffline
-                      ? 'bg-amber-950/70 border-amber-600 text-amber-200'
-                      : 'bg-slate-950 border-slate-800 text-slate-300'
-                  }`}
-                >
-                  <span>Modo sin conexión</span>
-                  <span>
-                    {appState.simulateNetworkOffline ? 'ACTIVO (Encolando)' : 'Conectado'}
+              <div className="rounded-xl bg-slate-950 border border-slate-800 p-3 text-xs space-y-1">
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-400">Estado de red del dispositivo:</span>
+                  <span className={`font-bold ${isOnline ? 'text-emerald-400' : 'text-amber-400'}`}>
+                    {isOnline ? 'Conectado a Internet' : 'Sin conexión a Internet'}
                   </span>
-                </button>
-
-                <button
-                  type="button"
-                  data-testid="toggle-simulate-api-error-btn"
-                  onClick={() =>
-                    setAppState((prev) => ({
-                      ...prev,
-                      simulateNextApiError: !prev.simulateNextApiError,
-                    }))
-                  }
-                  className={`min-h-[44px] px-3 rounded-xl border font-semibold flex items-center justify-between ${
-                    appState.simulateNextApiError
-                      ? 'bg-rose-950/70 border-rose-600 text-rose-200'
-                      : 'bg-slate-950 border-slate-800 text-slate-300'
-                  }`}
-                >
-                  <span>Simular fallo de API</span>
-                  <span>{appState.simulateNextApiError ? 'Armado' : 'Inactivo'}</span>
-                </button>
+                </div>
               </div>
 
-              {userPendingOfflineQueue.length > 0 && (
+              {userPendingOfflineQueue.length > 0 ? (
                 <div
                   data-testid="offline-queue-panel"
                   className="rounded-xl bg-amber-950/40 border border-amber-700/70 p-3 space-y-2 text-xs"
@@ -2977,6 +3011,10 @@ export const App: React.FC = () => {
                     </button>
                   </div>
                 </div>
+              ) : (
+                <p className="text-xs text-slate-400">
+                  No hay gastos pendientes de sincronización. Todos los movimientos están al día.
+                </p>
               )}
             </section>
 

@@ -145,8 +145,12 @@ export function createInitialUserState(
   const madridNow = getMadridDateParts(nowInstantUtc);
   const periodKey = madridNow.periodKey;
 
+  const cashAccountId = userId ? `acc_cash_main_${userId}` : 'acc_cash_main';
+  const bankAccountId = userId ? `acc_bank_caixabank_${userId}` : 'acc_bank_caixabank';
+  const savingsAccountId = userId ? `acc_savings_excluded_${userId}` : 'acc_savings_excluded';
+
   const cashAccount = createAccount({
-    id: 'acc_cash_main',
+    id: cashAccountId,
     userId,
     name: 'Efectivo en mano',
     type: 'cash',
@@ -155,7 +159,7 @@ export function createInitialUserState(
   });
 
   const bankAccount = createAccount({
-    id: 'acc_bank_caixabank',
+    id: bankAccountId,
     userId,
     name: 'Cuenta CaixaBank',
     type: 'bank',
@@ -166,7 +170,7 @@ export function createInitialUserState(
   });
 
   const savingsAccount = createAccount({
-    id: 'acc_savings_excluded',
+    id: savingsAccountId,
     userId,
     name: 'Cuenta Ahorro Separada',
     type: 'savings',
