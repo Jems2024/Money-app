@@ -12,6 +12,7 @@ import {
 } from '../domain/ledger';
 import {
   BudgetPeriodAllocation,
+  createBudgetAllocation,
   CrossPeriodRefundPolicy,
   PERSONAL_ENVELOPE_TEMPLATE_EUR,
 } from '../domain/budgets';
@@ -89,15 +90,22 @@ export interface AppUserState {
   simulateNextApiError: boolean;
 }
 
+function getEnvVar(key: string): string | undefined {
+  try {
+    const meta = import.meta as unknown as { env?: Record<string, string | undefined> };
+    return meta?.env?.[key];
+  } catch {
+    return undefined;
+  }
+}
+
 export const KNOWN_SUPABASE_PROJECT_REF = 'zsnvclyoypabmgqqaizj';
 export const KNOWN_SUPABASE_PROJECT_URL = `https://${KNOWN_SUPABASE_PROJECT_REF}.supabase.co`;
 
 const SUPABASE_URL =
-  (import.meta.env.VITE_SUPABASE_URL as string | undefined) || KNOWN_SUPABASE_PROJECT_URL;
-const SUPABASE_PUBLISHABLE_KEY = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as
-  | string
-  | undefined;
-const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
+  getEnvVar('VITE_SUPABASE_URL') || KNOWN_SUPABASE_PROJECT_URL;
+const SUPABASE_PUBLISHABLE_KEY = getEnvVar('VITE_SUPABASE_PUBLISHABLE_KEY');
+const SUPABASE_ANON_KEY = getEnvVar('VITE_SUPABASE_ANON_KEY');
 
 const effectivePublicKey =
   SUPABASE_PUBLISHABLE_KEY && !SUPABASE_PUBLISHABLE_KEY.includes('placeholder')
@@ -179,7 +187,7 @@ export function createInitialUserState(
   });
 
   const envModeRaw =
-    (import.meta.env.VITE_BANK_PROVIDER_MODE as string | undefined) ?? 'unconfigured';
+    getEnvVar('VITE_BANK_PROVIDER_MODE') ?? 'unconfigured';
   const bankMode: ProviderEnvironmentMode =
     envModeRaw === 'sandbox' || envModeRaw === 'production' ? envModeRaw : 'unconfigured';
 
@@ -282,6 +290,43 @@ export function normalizeLoadedUserState(
       ? loaded.bankOnboardingCompleted
       : Boolean(hasExistingUserActivity);
 
+  // If no budget for current month, check if previous month had repeatMonthly enabled
+  let activeBudget = cleanedAllocations[currentMadridPeriod];
+  if (!activeBudget) {
+    const sortedKeys = (Object.keys(cleanedAllocations) as PeriodMonthKey[]).sort().reverse();
+    for (const pk of sortedKeys) {
+      const prev = cleanedAllocations[pk];
+      if (prev?.confirmedByUser && prev?.repeatMonthly) {
+        activeBudget = createBudgetAllocation({
+          id: `bud_${currentMadridPeriod}`,
+          userId: loaded.userId,
+          periodKey: currentMadridPeriod,
+          confirmedByUser: true,
+          protectedSavingsAllocatedCents: prev.protectedSavingsAllocatedCents,
+          smallPurchasesAllocatedCents: prev.smallPurchasesAllocatedCents,
+          flexibleSpendingAllocatedCents: prev.flexibleSpendingAllocatedCents,
+          rolloverFromPreviousCents: 0,
+          manualAdjustmentsCents: 0,
+          categoryAllocationsCents: { ...(prev.categoryAllocationsCents ?? {}) },
+          scopeMode: prev.scopeMode,
+          selectedAccountIds: [...(prev.selectedAccountIds ?? [])],
+          repeatMonthly: true,
+        });
+        cleanedAllocations[currentMadridPeriod] = activeBudget;
+        break;
+      }
+    }
+  }
+
+  const effectiveScopeMode =
+    activeBudget?.scopeMode ?? loaded.budgetScopeMode ?? 'personal_only';
+  const effectiveSelectedAccountIds =
+    activeBudget?.selectedAccountIds && activeBudget.selectedAccountIds.length > 0
+      ? activeBudget.selectedAccountIds
+      : loaded.budgetSelectedAccountIds && loaded.budgetSelectedAccountIds.length > 0
+        ? loaded.budgetSelectedAccountIds
+        : base.budgetSelectedAccountIds;
+
   return {
     ...base,
     ...loaded,
@@ -292,11 +337,8 @@ export function normalizeLoadedUserState(
     selectedHomeBankScope: loaded.selectedHomeBankScope ?? base.selectedHomeBankScope,
     onboardingConfirmed: Boolean(cleanedAllocations[currentMadridPeriod]?.confirmedByUser),
     hasLegacyTemplateBudget: hasLegacyConfirmed,
-    budgetScopeMode: loaded.budgetScopeMode ?? 'personal_only',
-    budgetSelectedAccountIds:
-      loaded.budgetSelectedAccountIds && loaded.budgetSelectedAccountIds.length > 0
-        ? loaded.budgetSelectedAccountIds
-        : base.budgetSelectedAccountIds,
+    budgetScopeMode: effectiveScopeMode,
+    budgetSelectedAccountIds: effectiveSelectedAccountIds,
     budgetAllocations: cleanedAllocations,
   };
 }

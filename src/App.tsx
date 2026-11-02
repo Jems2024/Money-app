@@ -32,7 +32,12 @@ import {
   parseMoneyToCents,
   subtractCents,
 } from './domain/money';
-import { CalendarDateISO, getMadridDateParts, PeriodMonthKey } from './domain/dates/madrid';
+import {
+  CalendarDateISO,
+  getMadridDateParts,
+  getTransactionPeriodKey,
+  PeriodMonthKey,
+} from './domain/dates/madrid';
 import {
   CanonicalTransaction,
   ObligationReservation,
@@ -116,12 +121,24 @@ function triggerBrowserFileDownload(blob: Blob, filename: string): void {
   setTimeout(() => URL.revokeObjectURL(url), 1500);
 }
 
+function urlBase64ToUint8Array(base64String: string): Uint8Array {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const rawData = window.atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; ++i) {
+    outputArray[i] = rawData.charCodeAt(i);
+  }
+  return outputArray;
+}
+
 export const App: React.FC = () => {
   // 1. Private Auth Session State
   const [session, setSession] = useState<UserSession | null>(() => loadActiveSession());
   const [authEmail, setAuthEmail] = useState('jared@stopspend.es');
   const [authPasscode, setAuthPasscode] = useState('');
   const [authError, setAuthError] = useState<string | null>(null);
+  const [isSubscribingPush, setIsSubscribingPush] = useState(false);
 
   // 2. Per-User App State & Device Offline Queue
   const [appState, setAppState] = useState<AppUserState>(() =>
@@ -710,19 +727,27 @@ export const App: React.FC = () => {
   // Requirement 2B: Save Monthly Budget (Does NOT alter bank balance!)
   const handleSaveMonthlyBudget = (params: {
     monthlyLimitCents: number;
+    smallPurchasesLimitCents?: number;
     categoryLimitsCents: Record<string, number>;
     scopeMode: 'personal_only' | 'all_spending';
     selectedAccountIds: string[];
+    repeatMonthly?: boolean;
   }) => {
+    const smallPurchasesCents = params.smallPurchasesLimitCents ?? 0;
+    const flexibleSpendingCents = Math.max(0, params.monthlyLimitCents - smallPurchasesCents);
+
     const newAlloc = createBudgetAllocation({
       id: `bud_${selectedPeriodKey}`,
       userId: appState.userId,
       periodKey: selectedPeriodKey,
       confirmedByUser: true,
       protectedSavingsAllocatedCents: 0,
-      smallPurchasesAllocatedCents: 0,
-      flexibleSpendingAllocatedCents: params.monthlyLimitCents,
+      smallPurchasesAllocatedCents: smallPurchasesCents,
+      flexibleSpendingAllocatedCents: flexibleSpendingCents,
       categoryAllocationsCents: params.categoryLimitsCents,
+      scopeMode: params.scopeMode,
+      selectedAccountIds: params.selectedAccountIds,
+      repeatMonthly: Boolean(params.repeatMonthly),
     });
 
     setAppState((prev) => ({
@@ -755,7 +780,7 @@ export const App: React.FC = () => {
 
     setIsBudgetModalOpen(false);
     setToastMessage({
-      text: `Presupuesto mensual de ${formatEur(params.monthlyLimitCents)} guardado para ${formatPeriodMonthLabelSpanish(selectedPeriodKey)}. El saldo de tu banco no cambia.`,
+      text: `Presupuesto mensual de ${formatEur(params.monthlyLimitCents)} guardado para ${formatPeriodMonthLabelSpanish(selectedPeriodKey)}.${smallPurchasesCents > 0 ? ` (Gastos hormiga: ${formatEur(smallPurchasesCents)})` : ''} El saldo de tu banco no cambia.`,
       type: 'success',
     });
   };
@@ -833,10 +858,93 @@ export const App: React.FC = () => {
       },
     });
 
+    let currentHandled = totalEval.updatedHandledRecords;
+    let currentOutbox = totalEval.updatedOutboxEvents;
+    let latestEmitted = totalEval.emittedEvent;
+
+    // Independent evaluation for small purchases ("Gastos hormiga") envelope
+    if (alloc.smallPurchasesAllocatedCents > 0) {
+      const smallEval = evaluateBudgetThresholdCrossing({
+        userId: prevState.userId,
+        budgetId: 'small_purchases_total',
+        budgetName: 'Gastos hormiga',
+        periodKey: prevState.currentPeriodKey,
+        budgetAllocatedCents: alloc.smallPurchasesAllocatedCents,
+        spentBeforeCents: beforeEnv.smallPurchasesNetSpentCents,
+        spentAfterCents: afterEnv.smallPurchasesNetSpentCents,
+        existingHandledRecords: currentHandled,
+        existingOutboxEvents: currentOutbox,
+        suppressAlertEmission: suppressAlerts,
+        includeSensitiveAmountsInPush: prevState.pushConfig.includeSensitiveAmountsInPush,
+        quietHoursConfig: {
+          enabled: prevState.pushConfig.quietHoursEnabled,
+          startHour: prevState.pushConfig.quietHoursStart,
+          endHour: prevState.pushConfig.quietHoursEnd,
+        },
+      });
+      currentHandled = smallEval.updatedHandledRecords;
+      currentOutbox = smallEval.updatedOutboxEvents;
+      if (smallEval.emittedEvent) {
+        latestEmitted = smallEval.emittedEvent;
+      }
+    }
+
+    // Independent evaluation for optional category limits
+    if (alloc.categoryAllocationsCents) {
+      for (const [catId, limitCents] of Object.entries(alloc.categoryAllocationsCents)) {
+        if (!limitCents || limitCents <= 0) continue;
+        const catObj = DEFAULT_SPANISH_CATEGORIES.find((c) => c.id === catId);
+        const catName = catObj?.nameSpanish ?? catId;
+
+        let catBefore = 0;
+        let catAfter = 0;
+        for (const tx of prevState.transactions) {
+          if (tx.status === 'superseded' || tx.categoryId !== catId) continue;
+          if (getTransactionPeriodKey(tx) !== alloc.periodKey) continue;
+          if (alloc.scopeMode === 'personal_only' && tx.scope !== 'personal') continue;
+          if (tx.type === 'expense') catBefore = addCents(catBefore, Math.abs(tx.amountCents));
+          if (tx.type === 'refund') catBefore = subtractCents(catBefore, Math.abs(tx.amountCents));
+        }
+        for (const tx of nextTransactions) {
+          if (tx.status === 'superseded' || tx.categoryId !== catId) continue;
+          if (getTransactionPeriodKey(tx) !== alloc.periodKey) continue;
+          if (alloc.scopeMode === 'personal_only' && tx.scope !== 'personal') continue;
+          if (tx.type === 'expense') catAfter = addCents(catAfter, Math.abs(tx.amountCents));
+          if (tx.type === 'refund') catAfter = subtractCents(catAfter, Math.abs(tx.amountCents));
+        }
+        catBefore = Math.max(0, catBefore);
+        catAfter = Math.max(0, catAfter);
+
+        const catEval = evaluateBudgetThresholdCrossing({
+          userId: prevState.userId,
+          budgetId: `cat_${catId}`,
+          budgetName: `Categoría: ${catName}`,
+          periodKey: prevState.currentPeriodKey,
+          budgetAllocatedCents: limitCents,
+          spentBeforeCents: catBefore,
+          spentAfterCents: catAfter,
+          existingHandledRecords: currentHandled,
+          existingOutboxEvents: currentOutbox,
+          suppressAlertEmission: suppressAlerts,
+          includeSensitiveAmountsInPush: prevState.pushConfig.includeSensitiveAmountsInPush,
+          quietHoursConfig: {
+            enabled: prevState.pushConfig.quietHoursEnabled,
+            startHour: prevState.pushConfig.quietHoursStart,
+            endHour: prevState.pushConfig.quietHoursEnd,
+          },
+        });
+        currentHandled = catEval.updatedHandledRecords;
+        currentOutbox = catEval.updatedOutboxEvents;
+        if (catEval.emittedEvent) {
+          latestEmitted = catEval.emittedEvent;
+        }
+      }
+    }
+
     return {
-      handledThresholds: totalEval.updatedHandledRecords,
-      alertOutbox: totalEval.updatedOutboxEvents,
-      latestEmitted: totalEval.emittedEvent,
+      handledThresholds: currentHandled,
+      alertOutbox: currentOutbox,
+      latestEmitted,
     };
   };
 
@@ -1026,6 +1134,98 @@ export const App: React.FC = () => {
       text: `Informe CSV descargado (${filename}) con protección contra inyección de fórmulas.`,
       type: 'success',
     });
+  };
+
+  useEffect(() => {
+    if ('Notification' in window) {
+      const p = Notification.permission;
+      setAppState((prev) => ({
+        ...prev,
+        pushConfig: {
+          ...prev.pushConfig,
+          permissionState: p,
+        },
+      }));
+    }
+  }, []);
+
+  const handleEnablePushNotifications = async () => {
+    if (!('Notification' in window)) {
+      setToastMessage({
+        text: 'Las notificaciones no están soportadas en este navegador o modo.',
+        type: 'warning',
+      });
+      return;
+    }
+
+    try {
+      setIsSubscribingPush(true);
+      const perm = await Notification.requestPermission();
+      let subEndpoint: string | null = null;
+      if (perm === 'granted') {
+        if ('serviceWorker' in navigator) {
+          const reg = await navigator.serviceWorker.ready;
+          const metaEnv = (import.meta as unknown as { env?: Record<string, string | undefined> })?.env;
+          const vapidPublicKey = metaEnv?.VITE_VAPID_PUBLIC_KEY;
+          let sub = await reg.pushManager.getSubscription();
+          if (!sub && vapidPublicKey) {
+            sub = await reg.pushManager.subscribe({
+              userVisibleOnly: true,
+              applicationServerKey: urlBase64ToUint8Array(vapidPublicKey) as BufferSource,
+            });
+          }
+          if (sub) {
+            subEndpoint = sub.endpoint;
+            if (supabaseClient) {
+              const subJson = sub.toJSON();
+              await supabaseClient.from('push_subscriptions').upsert(
+                {
+                  id: `sub_${appState.userId}_${Date.now()}`,
+                  user_id: appState.userId,
+                  endpoint: sub.endpoint,
+                  p256dh_key: subJson.keys?.p256dh ?? null,
+                  auth_secret: subJson.keys?.auth ?? null,
+                  is_active: true,
+                  device_label: 'iPhone (PWA)',
+                },
+                { onConflict: 'user_id,endpoint' }
+              );
+            }
+          }
+        }
+        setAppState((prev) => ({
+          ...prev,
+          pushConfig: {
+            ...prev.pushConfig,
+            permissionState: 'granted',
+            subscribedEndpoint: subEndpoint ?? prev.pushConfig.subscribedEndpoint,
+          },
+        }));
+        setToastMessage({
+          text: 'Notificaciones activadas en este dispositivo.',
+          type: 'success',
+        });
+      } else {
+        setAppState((prev) => ({
+          ...prev,
+          pushConfig: {
+            ...prev.pushConfig,
+            permissionState: perm,
+          },
+        }));
+        setToastMessage({
+          text: 'Permiso de notificaciones no concedido.',
+          type: 'warning',
+        });
+      }
+    } catch (err) {
+      setToastMessage({
+        text: err instanceof Error ? err.message : 'Error al activar notificaciones.',
+        type: 'error',
+      });
+    } finally {
+      setIsSubscribingPush(false);
+    }
   };
 
   // ============================================================================
@@ -1575,6 +1775,47 @@ export const App: React.FC = () => {
                           Excluye {budgetComparison.excludedNonPersonalCount} gasto(s) marcados como no personales ({formatEur(budgetComparison.excludedNonPersonalCents)}).
                         </p>
                       )}
+
+                    {configuredBudgetForSelectedMonth && configuredBudgetForSelectedMonth.smallPurchasesAllocatedCents > 0 && (
+                      <div
+                        data-testid="home-small-purchases-card"
+                        className="rounded-xl bg-amber-950/40 border border-amber-800/60 p-3 space-y-1.5"
+                      >
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="font-semibold text-amber-300">
+                            Gastos hormiga / compras pequeñas
+                          </span>
+                          <span className="font-mono text-slate-200 font-bold">
+                            {formatEur(envelopesView.smallPurchasesNetSpentCents)} / {formatEur(configuredBudgetForSelectedMonth.smallPurchasesAllocatedCents)}
+                          </span>
+                        </div>
+                        <div className="w-full h-2 rounded-full bg-slate-800 overflow-hidden">
+                          <div
+                            className={`h-full transition-all ${
+                              envelopesView.smallPurchasesRemainingCents < 0
+                                ? 'bg-rose-500'
+                                : (envelopesView.smallPurchasesUsedPercent ?? 0) >= 75
+                                  ? 'bg-amber-500'
+                                  : 'bg-emerald-500'
+                            }`}
+                            style={{
+                              width: `${Math.min(
+                                100,
+                                Math.max(0, envelopesView.smallPurchasesUsedPercent ?? 0)
+                              )}%`,
+                            }}
+                          />
+                        </div>
+                        <div className="flex items-center justify-between text-[11px] text-slate-400">
+                          <span>
+                            {envelopesView.smallPurchasesRemainingCents < 0
+                              ? `Excedido por ${formatEur(Math.abs(envelopesView.smallPurchasesRemainingCents))}`
+                              : `Te quedan: ${formatEur(envelopesView.smallPurchasesRemainingCents)}`}
+                          </span>
+                          <span>{envelopesView.smallPurchasesUsedPercent ?? 0}% utilizado</span>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </>
               ) : (
@@ -3018,6 +3259,90 @@ export const App: React.FC = () => {
               )}
             </section>
 
+            {/* 3. Push Notifications & PWA on iPhone */}
+            <section
+              data-testid="settings-notifications-card"
+              className="rounded-2xl bg-slate-900 border border-slate-800 p-4 space-y-3"
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-400">
+                    Avisos en iPhone (Web Push)
+                  </span>
+                  <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2 mt-0.5">
+                    <Bell className="w-4 h-4 text-emerald-400" />
+                    <span>Notificaciones al acercarte al límite</span>
+                  </h3>
+                </div>
+                <span
+                  data-testid="settings-push-permission-badge"
+                  className={`text-xs font-semibold px-2.5 py-1 rounded-lg border ${
+                    appState.pushConfig.permissionState === 'granted'
+                      ? 'bg-emerald-950/80 border-emerald-600 text-emerald-300'
+                      : appState.pushConfig.permissionState === 'denied'
+                        ? 'bg-rose-950/80 border-rose-600 text-rose-300'
+                        : 'bg-slate-950 border-slate-800 text-slate-400'
+                  }`}
+                >
+                  {appState.pushConfig.permissionState === 'granted'
+                    ? 'Activadas'
+                    : appState.pushConfig.permissionState === 'denied'
+                      ? 'Bloqueadas en navegador'
+                      : 'Sin activar'}
+                </span>
+              </div>
+
+              <p className="text-xs text-slate-300">
+                Recibe avisos al alcanzar el 50%, 75%, 90% o 100% de tu presupuesto mensual o de tus gastos hormiga, incluso con la aplicación cerrada.
+              </p>
+
+              <div className="flex flex-wrap gap-2 pt-1">
+                {appState.pushConfig.permissionState !== 'granted' && (
+                  <button
+                    type="button"
+                    data-testid="enable-push-notifications-btn"
+                    disabled={isSubscribingPush}
+                    onClick={handleEnablePushNotifications}
+                    className="min-h-[40px] px-3.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-xs font-bold text-white flex items-center gap-1.5 shadow-md shadow-emerald-950"
+                  >
+                    <Bell className="w-3.5 h-3.5" />
+                    <span>{isSubscribingPush ? 'Activando...' : 'Activar avisos en este iPhone'}</span>
+                  </button>
+                )}
+              </div>
+
+              {/* Toggle Sensitive Amounts in Locked Screen */}
+              <label className="flex items-center justify-between gap-3 rounded-xl bg-slate-950/80 border border-slate-800 p-3 cursor-pointer select-none">
+                <div className="text-xs">
+                  <span className="font-semibold text-slate-200 block">
+                    Mostrar importes de gasto en pantalla bloqueada
+                  </span>
+                  <span className="text-[11px] text-slate-400 block">
+                    Si está desactivado, el aviso dirá "Has alcanzado un umbral de presupuesto" sin mostrar euros ni comercios.
+                  </span>
+                </div>
+                <input
+                  type="checkbox"
+                  data-testid="toggle-sensitive-amounts-push"
+                  checked={appState.pushConfig.includeSensitiveAmountsInPush}
+                  onChange={(e) =>
+                    setAppState((prev) => ({
+                      ...prev,
+                      pushConfig: {
+                        ...prev.pushConfig,
+                        includeSensitiveAmountsInPush: e.target.checked,
+                      },
+                    }))
+                  }
+                  className="w-4 h-4 rounded text-emerald-500 focus:ring-emerald-400 bg-slate-900 border-slate-700"
+                />
+              </label>
+
+              <div className="rounded-xl bg-slate-950 border border-slate-800 p-2.5 text-[11px] text-slate-400">
+                <span>Horario de descanso respetado: de 22:00 a 08:00 (hora peninsular española) las notificaciones se silencian y se entregan a partir de las 08:00.</span>
+              </div>
+            </section>
+
             {/* 4. Data Deletion & Safe Logout */}
             <section className="rounded-2xl bg-slate-900 border border-slate-800 p-4 space-y-3">
               <h3 className="text-sm font-bold text-slate-100">
@@ -3153,11 +3478,17 @@ export const App: React.FC = () => {
               )
             : null
         }
+        initialSmallPurchasesLimitCents={
+          configuredBudgetForSelectedMonth?.smallPurchasesAllocatedCents ?? null
+        }
         initialCategoryLimitsCents={
           configuredBudgetForSelectedMonth?.categoryAllocationsCents ?? {}
         }
         initialScopeMode={appState.budgetScopeMode}
         initialSelectedAccountIds={appState.budgetSelectedAccountIds}
+        initialRepeatMonthly={
+          configuredBudgetForSelectedMonth?.repeatMonthly ?? false
+        }
         ownedAccounts={appState.accounts.filter((a) => a.isOwned)}
         excludedNonPersonalCount={homeMonthReport.nonPersonalTransactionsCount}
         excludedNonPersonalCents={homeMonthReport.nonPersonalExpensesCents}

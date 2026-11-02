@@ -66,6 +66,9 @@ export interface BudgetPeriodAllocation {
   rolloverFromPreviousCents: Cents; // Explicit rollover (can be positive or negative per policy, default 0)
   manualAdjustmentsCents: Cents;
   categoryAllocationsCents: Record<string, Cents>;
+  scopeMode?: 'personal_only' | 'all_spending';
+  selectedAccountIds?: string[];
+  repeatMonthly?: boolean;
 }
 
 /**
@@ -83,6 +86,9 @@ export function createBudgetAllocation(params: {
   rolloverFromPreviousCents?: Cents;
   manualAdjustmentsCents?: Cents;
   categoryAllocationsCents?: Record<string, Cents>;
+  scopeMode?: 'personal_only' | 'all_spending';
+  selectedAccountIds?: string[];
+  repeatMonthly?: boolean;
 }): BudgetPeriodAllocation {
   assertValidCents(params.protectedSavingsAllocatedCents);
   assertValidCents(params.smallPurchasesAllocatedCents);
@@ -115,6 +121,9 @@ export function createBudgetAllocation(params: {
     rolloverFromPreviousCents: rollover,
     manualAdjustmentsCents: adjustments,
     categoryAllocationsCents: params.categoryAllocationsCents ?? {},
+    scopeMode: params.scopeMode ?? 'personal_only',
+    selectedAccountIds: params.selectedAccountIds ?? [],
+    repeatMonthly: Boolean(params.repeatMonthly),
   };
 }
 

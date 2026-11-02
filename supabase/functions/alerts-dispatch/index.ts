@@ -291,11 +291,11 @@ if (typeof Deno !== 'undefined' && typeof Deno.serve === 'function') {
       }
       const vapidPrivateKeyJwk = JSON.parse(vapidKeyJson);
 
-      // Fetch pending alerts
+      // Fetch pending / queued alerts
       const { data: outboxRows } = await serviceClient
         .from('alert_outbox')
         .select('*')
-        .eq('delivery_state', 'pending');
+        .in('delivery_state', ['generated', 'queued_quiet_hours', 'failed_transient']);
 
       const { data: subRows } = await serviceClient
         .from('push_subscriptions')

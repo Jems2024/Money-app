@@ -8,8 +8,14 @@
  *    exposing sensitive financial data in URLs.
  */
 
-const CACHE_NAME = 'stop-spend-shell-v1';
-const STATIC_SHELL_URLS = ['/', '/index.html', '/manifest.webmanifest', '/icon.svg'];
+const CACHE_NAME = 'stop-spend-shell-v2';
+const BASE_PATH = self.registration?.scope ? new URL(self.registration.scope).pathname : '/';
+const STATIC_SHELL_URLS = [
+  BASE_PATH,
+  `${BASE_PATH.replace(/\/$/, '')}/index.html`,
+  `${BASE_PATH.replace(/\/$/, '')}/manifest.webmanifest`,
+  `${BASE_PATH.replace(/\/$/, '')}/icon.svg`,
+];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(

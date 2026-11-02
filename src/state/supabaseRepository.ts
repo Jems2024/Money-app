@@ -346,6 +346,10 @@ export async function fetchUserStateFromSupabase(
       flexibleSpendingAllocatedCents: Number(b.flexible_spending_allocated_cents),
       rolloverFromPreviousCents: Number(b.rollover_from_previous_cents ?? 0),
       manualAdjustmentsCents: Number(b.manual_adjustments_cents ?? 0),
+      categoryAllocationsCents: (b.category_allocations_cents as Record<string, number> | undefined) ?? {},
+      scopeMode: (b.scope_mode as 'personal_only' | 'all_spending' | undefined) ?? 'personal_only',
+      selectedAccountIds: (b.selected_account_ids as string[] | undefined) ?? [],
+      repeatMonthly: Boolean(b.repeat_monthly),
     });
     if (!alloc.confirmedByUser && isLegacyDefaultTemplateAllocation(alloc)) {
       continue;
@@ -697,6 +701,10 @@ export async function persistBudgetAllocationToSupabase(params: {
       flexible_spending_allocated_cents: params.allocation.flexibleSpendingAllocatedCents,
       rollover_from_previous_cents: params.allocation.rolloverFromPreviousCents,
       manual_adjustments_cents: params.allocation.manualAdjustmentsCents,
+      category_allocations_cents: params.allocation.categoryAllocationsCents ?? {},
+      scope_mode: params.allocation.scopeMode ?? 'personal_only',
+      selected_account_ids: params.allocation.selectedAccountIds ?? [],
+      repeat_monthly: Boolean(params.allocation.repeatMonthly),
     },
     { onConflict: 'user_id,period_key' }
   );

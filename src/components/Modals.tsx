@@ -32,17 +32,21 @@ export const BudgetSetupModal: React.FC<{
   periodLabelSpanish: string;
   isEditingExisting: boolean;
   initialMonthlyLimitCents: number | null;
+  initialSmallPurchasesLimitCents?: number | null;
   initialCategoryLimitsCents: Record<string, number>;
   initialScopeMode: 'personal_only' | 'all_spending';
   initialSelectedAccountIds: string[];
+  initialRepeatMonthly?: boolean;
   ownedAccounts: readonly Account[];
   excludedNonPersonalCount: number;
   excludedNonPersonalCents: number;
   onSave: (params: {
     monthlyLimitCents: number;
+    smallPurchasesLimitCents?: number;
     categoryLimitsCents: Record<string, number>;
     scopeMode: 'personal_only' | 'all_spending';
     selectedAccountIds: string[];
+    repeatMonthly?: boolean;
   }) => void;
   onClose: () => void;
 }> = ({
@@ -51,9 +55,11 @@ export const BudgetSetupModal: React.FC<{
   periodLabelSpanish,
   isEditingExisting,
   initialMonthlyLimitCents,
+  initialSmallPurchasesLimitCents,
   initialCategoryLimitsCents,
   initialScopeMode,
   initialSelectedAccountIds,
+  initialRepeatMonthly,
   ownedAccounts,
   excludedNonPersonalCount,
   excludedNonPersonalCents,
@@ -61,6 +67,8 @@ export const BudgetSetupModal: React.FC<{
   onClose,
 }) => {
   const [monthlyLimitInput, setMonthlyLimitInput] = useState('');
+  const [smallPurchasesInput, setSmallPurchasesInput] = useState('');
+  const [repeatMonthly, setRepeatMonthly] = useState(Boolean(initialRepeatMonthly));
   const [scopeMode, setScopeMode] = useState<'personal_only' | 'all_spending'>(initialScopeMode);
   const [selectedAccountIds, setSelectedAccountIds] = useState<string[]>(initialSelectedAccountIds);
   const [showCategoryLimits, setShowCategoryLimits] = useState(false);
@@ -74,6 +82,14 @@ export const BudgetSetupModal: React.FC<{
           ? centsToSpanishDecimal(initialMonthlyLimitCents)
           : ''
       );
+      setSmallPurchasesInput(
+        initialSmallPurchasesLimitCents !== null &&
+          initialSmallPurchasesLimitCents !== undefined &&
+          initialSmallPurchasesLimitCents > 0
+          ? centsToSpanishDecimal(initialSmallPurchasesLimitCents)
+          : ''
+      );
+      setRepeatMonthly(Boolean(initialRepeatMonthly));
       setScopeMode(initialScopeMode);
       setSelectedAccountIds(
         initialSelectedAccountIds.length > 0
@@ -95,6 +111,8 @@ export const BudgetSetupModal: React.FC<{
   }, [
     isOpen,
     initialMonthlyLimitCents,
+    initialSmallPurchasesLimitCents,
+    initialRepeatMonthly,
     initialCategoryLimitsCents,
     initialScopeMode,
     initialSelectedAccountIds,
@@ -126,6 +144,18 @@ export const BudgetSetupModal: React.FC<{
         return;
       }
 
+      let parsedSmallPurchasesCents = 0;
+      if (smallPurchasesInput.trim()) {
+        parsedSmallPurchasesCents = parseMoneyToCents(smallPurchasesInput.trim(), {
+          currency: 'EUR',
+          allowNegative: false,
+        });
+        if (parsedSmallPurchasesCents > limitCents) {
+          setErrorMsg('El límite de gastos hormiga no puede superar el límite mensual total.');
+          return;
+        }
+      }
+
       const parsedCategoryLimits: Record<string, number> = {};
       for (const [catId, rawVal] of Object.entries(categoryInputs)) {
         const trimmed = rawVal.trim();
@@ -141,9 +171,11 @@ export const BudgetSetupModal: React.FC<{
 
       onSave({
         monthlyLimitCents: limitCents,
+        smallPurchasesLimitCents: parsedSmallPurchasesCents,
         categoryLimitsCents: parsedCategoryLimits,
         scopeMode,
         selectedAccountIds,
+        repeatMonthly,
       });
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Importe de presupuesto inválido.');
@@ -209,6 +241,29 @@ export const BudgetSetupModal: React.FC<{
             value={monthlyLimitInput}
             onChange={(e) => setMonthlyLimitInput(e.target.value)}
             className="w-full rounded-xl bg-slate-950 border border-slate-700 px-4 py-3 text-2xl font-mono font-bold text-slate-100 focus:border-emerald-500 focus:outline-none"
+          />
+        </div>
+
+        {/* Small Purchases / Gastos Hormiga Limit Input */}
+        <div className="rounded-xl bg-slate-950/90 border border-slate-800 p-3 space-y-1.5">
+          <label
+            htmlFor="budget-small-purchases-input"
+            className="block text-xs font-semibold uppercase tracking-wider text-amber-400"
+          >
+            Límite para gastos hormiga / compras pequeñas (EUR, opcional)
+          </label>
+          <p className="text-[11px] text-slate-400">
+            Fija un tope específico para compras pequeñas o antojos (ej. 40,00 €). Si te acercas, recibirás alertas independientes.
+          </p>
+          <input
+            id="budget-small-purchases-input"
+            data-testid="budget-small-purchases-input"
+            type="text"
+            inputMode="decimal"
+            placeholder="Ej. 40,00 (opcional)"
+            value={smallPurchasesInput}
+            onChange={(e) => setSmallPurchasesInput(e.target.value)}
+            className="w-full min-h-[42px] rounded-xl bg-slate-900 border border-slate-700 px-3 py-2 text-lg font-mono font-bold text-slate-100 focus:border-amber-500 focus:outline-none"
           />
         </div>
 
@@ -327,6 +382,23 @@ export const BudgetSetupModal: React.FC<{
             </div>
           )}
         </div>
+
+        {/* Repeat Monthly Preference */}
+        <label className="flex items-center gap-3 rounded-xl bg-slate-950/80 border border-slate-800 p-3 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            data-testid="budget-repeat-monthly-checkbox"
+            checked={repeatMonthly}
+            onChange={(e) => setRepeatMonthly(e.target.checked)}
+            className="w-4 h-4 rounded text-emerald-500 focus:ring-emerald-400 bg-slate-900 border-slate-700"
+          />
+          <div className="text-xs">
+            <span className="font-semibold text-slate-200 block">Repetir automáticamente cada mes</span>
+            <span className="text-[11px] text-slate-400 block">
+              Mantiene estos límites y cuentas seleccionadas para los próximos meses.
+            </span>
+          </div>
+        </label>
 
         {errorMsg && (
           <div

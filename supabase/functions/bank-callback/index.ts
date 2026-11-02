@@ -138,6 +138,7 @@ if (typeof Deno !== 'undefined' && typeof Deno.serve === 'function') {
       // Exchange code for session
       const session = await adapter.exchangeCodeForSession(code);
       const nowIso = new Date().toISOString();
+      let hasSuccessfulBalanceRead = false;
 
       // Upsert discovered accounts and balances
       for (const acc of session.accounts) {
@@ -181,6 +182,7 @@ if (typeof Deno !== 'undefined' && typeof Deno.serve === 'function') {
               reference_booking_date: b.referenceBookingDate,
               includes_pending_debits: b.includesPendingDebits,
             });
+            hasSuccessfulBalanceRead = true;
           }
         } catch {
           // If balance fetch fails initially, sync will retry
@@ -198,10 +200,10 @@ if (typeof Deno !== 'undefined' && typeof Deno.serve === 'function') {
           aspsp_name: stateRow.aspsp_name,
           status: 'connected',
           has_valid_session: true,
-          has_successful_real_read: true,
-          last_sync_at: nowIso,
+          has_successful_real_read: hasSuccessfulBalanceRead,
+          last_sync_at: hasSuccessfulBalanceRead ? nowIso : null,
           provider_session_id: session.sessionId,
-          last_error_spanish: null,
+          last_error_spanish: hasSuccessfulBalanceRead ? null : 'Sesión autorizada. Pendiente de sincronizar saldo.',
           updated_at: nowIso,
         },
         { onConflict: 'id' }

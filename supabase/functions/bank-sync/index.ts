@@ -211,6 +211,9 @@ if (typeof Deno !== 'undefined' && typeof Deno.serve === 'function') {
       const dateFrom = getMadridDateParts(new Date(dateFromMs).toISOString()).calendarDate;
 
       let totalNewTransactions = 0;
+      let anyAccountSucceeded = false;
+      let anyAccountFailed = false;
+      let lastAccountError: string | null = null;
 
       for (const rawAcc of dbAccounts) {
         if (!rawAcc.provider_session_account_id) continue;
@@ -329,10 +332,10 @@ if (typeof Deno !== 'undefined' && typeof Deno.serve === 'function') {
         // Cursor
         const cursor: SyncCursorState = {
           connectionId: bankConn.id,
-          accountId: account.id,
           lastSuccessfulBookingDate: null,
-          lastContinuationKey: null,
-          syncInProgress: false,
+          lastSuccessfulSyncUtc: bankConn.last_sync_at ? String(bankConn.last_sync_at) : null,
+          isLocked: false,
+          lastErrorSpanish: null,
         };
 
         const syncResult = await syncAccountPagesAtomically({
@@ -355,6 +358,7 @@ if (typeof Deno !== 'undefined' && typeof Deno.serve === 'function') {
         });
 
         if (syncResult.success) {
+          anyAccountSucceeded = true;
           // Persist updated source records
           for (const src of syncResult.sourceRecords) {
             await serviceClient.from('source_records').upsert(
@@ -385,45 +389,91 @@ if (typeof Deno !== 'undefined' && typeof Deno.serve === 'function') {
           }
 
           // Persist canonical transactions
-          for (const tx of syncResult.canonicalTransactions) {
+          for (const tx of syncResult.transactions) {
             const dbRow = mapTransactionToDbRow(user.id, tx);
             await serviceClient
               .from('canonical_transactions')
               .upsert(dbRow, { onConflict: 'id' });
           }
 
-          totalNewTransactions += syncResult.canonicalTransactions.length - existingTransactions.length;
+          totalNewTransactions += Math.max(0, syncResult.transactions.length - existingTransactions.length);
         } else {
-          // Sync failed: preserve existing data, record error
+          anyAccountFailed = true;
+          const failureMsg = syncResult.updatedCursor.lastErrorSpanish ?? 'Fallo al sincronizar transacciones con CaixaBank.';
+          lastAccountError = failureMsg;
           await serviceClient
             .from('bank_connections')
             .update({
-              last_error_spanish: syncResult.failureReasonSpanish ?? 'Fallo al sincronizar con CaixaBank.',
+              last_error_spanish: failureMsg,
               updated_at: nowIso,
             })
             .eq('user_id', user.id);
         }
       }
 
-      // Mark successful sync
-      await serviceClient
-        .from('bank_connections')
-        .update({
-          last_sync_at: nowIso,
-          last_error_spanish: null,
-          has_successful_real_read: true,
-          updated_at: nowIso,
-        })
-        .eq('user_id', user.id);
+      if (anyAccountSucceeded && !anyAccountFailed) {
+        // Full success: all accounts synced cleanly
+        await serviceClient
+          .from('bank_connections')
+          .update({
+            last_sync_at: nowIso,
+            last_error_spanish: null,
+            has_successful_real_read: true,
+            updated_at: nowIso,
+          })
+          .eq('user_id', user.id);
 
-      return new Response(
-        JSON.stringify({
-          success: true,
-          newTransactionsCount: Math.max(0, totalNewTransactions),
-          syncedAtUtc: nowIso,
-        }),
-        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
+        return new Response(
+          JSON.stringify({
+            success: true,
+            status: 'full_success',
+            newTransactionsCount: Math.max(0, totalNewTransactions),
+            syncedAtUtc: nowIso,
+          }),
+          { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      } else if (anyAccountSucceeded && anyAccountFailed) {
+        // Partial success: at least one account succeeded, one failed
+        await serviceClient
+          .from('bank_connections')
+          .update({
+            last_sync_at: nowIso,
+            last_error_spanish: `Sincronización parcial: ${lastAccountError ?? 'alguna cuenta no pudo completarse.'}`,
+            has_successful_real_read: true,
+            updated_at: nowIso,
+          })
+          .eq('user_id', user.id);
+
+        return new Response(
+          JSON.stringify({
+            success: true,
+            status: 'partial_success',
+            newTransactionsCount: Math.max(0, totalNewTransactions),
+            syncedAtUtc: nowIso,
+            warningSpanish: `Sincronización parcial: ${lastAccountError}`,
+          }),
+          { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      } else {
+        // Complete failure: do not clear error, do not mark successful real read, preserve valid data
+        await serviceClient
+          .from('bank_connections')
+          .update({
+            last_error_spanish: lastAccountError ?? 'No se pudo sincronizar ninguna cuenta con CaixaBank.',
+            updated_at: nowIso,
+          })
+          .eq('user_id', user.id);
+
+        return new Response(
+          JSON.stringify({
+            success: false,
+            status: 'failed',
+            error: 'SYNC_FAILED',
+            messageSpanish: lastAccountError ?? 'No se pudo sincronizar ninguna cuenta con CaixaBank. Se conservan los datos anteriores.',
+          }),
+          { status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       return new Response(
