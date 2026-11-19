@@ -76,12 +76,9 @@ export async function startEnableBankingAuth(params: {
   ).toString("base64url");
 
   if (!isEnableBankingConfigured()) {
-    // Modo Sandbox Interactivo Gratuito cuando aún no se ha cargado el certificado PEM PSD2
-    return {
-      mode: "sandbox" as const,
-      url: `${params.redirectBaseUrl}/api/enable-banking/callback?code=SANDBOX_PSD2_CODE_${params.role.toUpperCase()}&state=${statePayload}`,
-      state: statePayload,
-    };
+    throw new Error(
+      "Faltan las credenciales reales de Enable Banking (ENABLE_BANKING_APP_ID y ENABLE_BANKING_PRIVATE_KEY) en el servidor."
+    );
   }
 
   const jwt = await createEnableBankingJWT();
@@ -126,23 +123,10 @@ export async function startEnableBankingAuth(params: {
  * Autoriza la sesión en Enable Banking tras el callback OAuth2 del banco (`POST /sessions`)
  */
 export async function exchangeEnableBankingCode(code: string) {
-  if (!isEnableBankingConfigured() || code.startsWith("SANDBOX_PSD2_CODE")) {
-    const isWife = code.includes("ESPOSA");
-    return {
-      session_id: `eb-session-${Date.now()}`,
-      accounts: [
-        {
-          uid: isWife
-            ? "eb-caixabank-esposa-live"
-            : "eb-caixabank-esposo-live",
-          iban: isWife
-            ? "ES66 0182 **** **** **** 9034"
-            : "ES91 2100 **** **** **** 4821",
-          name: isWife ? "Cuenta Nómina Ella" : "Cuenta Nómina Él",
-          balance: isWife ? 1560.4 : 2290.8,
-        },
-      ],
-    };
+  if (!isEnableBankingConfigured()) {
+    throw new Error(
+      "Enable Banking no está configurado en el servidor. No se crean cuentas simuladas."
+    );
   }
 
   const jwt = await createEnableBankingJWT();
@@ -207,47 +191,12 @@ export async function exchangeEnableBankingCode(code: string) {
  */
 export async function fetchEnableBankingAccountSync(
   enableBankingAccountId: string,
-  role: FamilyRole
+  _role: FamilyRole
 ) {
-  if (!isEnableBankingConfigured() || enableBankingAccountId.startsWith("eb-")) {
-    const today = new Date().toISOString().slice(0, 10);
-    return {
-      currentBalance: role === "esposa" ? 1545.8 : 2215.4,
-      transactions:
-        role === "esposa"
-          ? [
-              {
-                external_tx_id: `EB-SYNC-${Date.now()}-1`,
-                date: today,
-                concept: "MERCADONA COMPRA SEMANAL",
-                amount: 64.3,
-                type: "expense" as const,
-              },
-              {
-                external_tx_id: `EB-SYNC-${Date.now()}-2`,
-                date: today,
-                concept: "CAFETERIA PANADERIA TURRIS",
-                amount: 8.4,
-                type: "expense" as const,
-              },
-            ]
-          : [
-              {
-                external_tx_id: `EB-SYNC-${Date.now()}-3`,
-                date: today,
-                concept: "ENDESA ENERGIA FACTURA LUZ",
-                amount: 94.5,
-                type: "expense" as const,
-              },
-              {
-                external_tx_id: `EB-SYNC-${Date.now()}-4`,
-                date: today,
-                concept: "CARREFOUR MARKET",
-                amount: 41.2,
-                type: "expense" as const,
-              },
-            ],
-    };
+  if (!isEnableBankingConfigured()) {
+    throw new Error(
+      "Enable Banking no está configurado en el servidor. No se simulan movimientos."
+    );
   }
 
   const jwt = await createEnableBankingJWT();

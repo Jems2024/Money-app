@@ -49,17 +49,17 @@ export default function FintonicInsightsPanel({
       {/* =====================================================================
           FILA 1: NOTA FINANCIERA PRIVADA (300-900) + PREVISIÓN FIN DE MES
          ===================================================================== */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 gap-4">
         {/* Tarjeta Nota Financiera estilo FinScore */}
-        <div className="rounded-3xl bg-slate-900/90 border border-slate-800 p-5 space-y-4 shadow-lg">
+        <div className="rounded-3xl bg-[#111216] border border-zinc-800 p-5 space-y-4">
           <div className="flex items-start justify-between gap-2">
             <div>
-              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-emerald-400">
+              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-[#00D084]">
                 <Award className="w-4 h-4" />
-                <span>Mi Nota Financiera Privada</span>
+                <span>Mi FinScore Privado</span>
               </div>
-              <p className="text-[11px] text-slate-400 mt-0.5">
-                Escala 300–900 · 100% privada (sin anuncios ni cesión a bancos)
+              <p className="text-[11px] text-zinc-400 mt-0.5">
+                Escala 300–900 · 100% privado (sin anuncios ni cesión a bancos)
               </p>
             </div>
             <span
@@ -108,7 +108,7 @@ export default function FintonicInsightsPanel({
         </div>
 
         {/* Tarjeta Previsión de Fin de Mes */}
-        <div className="rounded-3xl bg-slate-900/90 border border-slate-800 p-5 space-y-4 shadow-lg">
+        <div className="rounded-3xl bg-[#111216] border border-zinc-800 p-5 space-y-4">
           <div className="flex items-start justify-between gap-2">
             <div>
               <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-sky-400">
@@ -170,9 +170,9 @@ export default function FintonicInsightsPanel({
       {/* =====================================================================
           FILA 2: RADAR DE ALERTAS TEMPRANAS + DESGLOSE POR CATEGORÍAS
          ===================================================================== */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 gap-4">
         {/* Radar de Alertas estilo Fintonic */}
-        <div className="rounded-3xl bg-slate-900/90 border border-slate-800 p-5 space-y-3 shadow-lg">
+        <div className="rounded-3xl bg-[#111216] border border-zinc-800 p-5 space-y-3">
           <div className="flex items-center justify-between">
             <h3 className="text-sm font-bold text-white flex items-center gap-2">
               <AlertOctagon className="w-4 h-4 text-amber-400" />
@@ -234,7 +234,7 @@ export default function FintonicInsightsPanel({
         </div>
 
         {/* Desglose por Categorías del Mes */}
-        <div className="rounded-3xl bg-slate-900/90 border border-slate-800 p-5 space-y-3 shadow-lg">
+        <div className="rounded-3xl bg-[#111216] border border-zinc-800 p-5 space-y-3">
           <div className="flex items-center justify-between">
             <h3 className="text-sm font-bold text-white flex items-center gap-2">
               <PieChart className="w-4 h-4 text-emerald-400" />

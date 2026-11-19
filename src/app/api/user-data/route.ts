@@ -483,6 +483,59 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ ok: true, phone });
     }
 
+    // 9. Eliminar una cuenta bancaria propia (y en cascada sus movimientos/recibos)
+    if (action === "delete_bank_account") {
+      const accountId = String(body.accountId || "");
+      const owned = await verifyAccountOwnership(accountId);
+      if (!owned) {
+        return NextResponse.json(
+          { ok: false, error: "Cuenta no encontrada o sin permiso" },
+          { status: 403 }
+        );
+      }
+
+      const { error } = await admin
+        .from("bank_accounts")
+        .delete()
+        .eq("id", accountId)
+        .eq("owner_user_id", user.id);
+
+      if (error) throw error;
+      return NextResponse.json({ ok: true, deletedAccountId: accountId });
+    }
+
+    // 10. Eliminar un recibo fijo propio
+    if (action === "delete_fixed_bill") {
+      const billId = String(body.billId || "");
+      const { data: userAccounts } = await admin
+        .from("bank_accounts")
+        .select("id")
+        .eq("owner_user_id", user.id);
+      const userAccountIds = (userAccounts || []).map((a) => a.id);
+
+      const { error } = await admin
+        .from("fixed_bills")
+        .delete()
+        .eq("id", billId)
+        .in("charged_account_id", userAccountIds);
+
+      if (error) throw error;
+      return NextResponse.json({ ok: true, deletedBillId: billId });
+    }
+
+    // 11. Eliminar un movimiento propio
+    if (action === "delete_transaction") {
+      const txId = String(body.txId || "");
+      const { error } = await admin
+        .from("transactions")
+        .delete()
+        .eq("id", txId)
+        .eq("user_id", user.id);
+
+      if (error) throw error;
+      return NextResponse.json({ ok: true, deletedTxId: txId });
+    }
+
     return NextResponse.json(
       { ok: false, error: "Acción no reconocida" },
       { status: 400 }

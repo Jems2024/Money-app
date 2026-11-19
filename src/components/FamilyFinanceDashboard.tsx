@@ -2,26 +2,33 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  AlertOctagon,
   AlertTriangle,
-  ArrowDownRight,
+  ArrowDownLeft,
+  ArrowLeftRight,
   ArrowUpRight,
-  BellRing,
+  Award,
+  Bell,
   Building2,
   CheckCircle2,
   Clock,
   Coffee,
   Edit3,
+  Home,
   Loader2,
   LogOut,
   Phone,
+  PieChart,
   Plus,
   Receipt,
+  RefreshCw,
   Save,
+  Search,
+  ShieldCheck,
   ShoppingBag,
   ShoppingCart,
-  Sparkles,
   Tag,
-  Wallet,
+  Trash2,
 } from "lucide-react";
 import {
   BankAccount,
@@ -55,12 +62,13 @@ interface AuthenticatedUserProfile {
   phone: string;
 }
 
+type FintonicTab = "inicio" | "movimientos" | "presupuesto" | "alertas" | "finscore";
+
 export default function FamilyFinanceDashboard() {
   const [loadingSession, setLoadingSession] = useState(true);
   const [currentUser, setCurrentUser] =
     useState<AuthenticatedUserProfile | null>(null);
 
-  // Datos 100% reales y privados del usuario en Supabase (empiezan vacíos en 0,00 €)
   const [accounts, setAccounts] = useState<BankAccount[]>([]);
   const [envelopes, setEnvelopes] = useState<MonthlyEnvelopes>({
     id: "",
@@ -76,12 +84,14 @@ export default function FamilyFinanceDashboard() {
   const [fixedBills, setFixedBills] = useState<FixedBill[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
 
-  // Pestaña activa del panel individual
-  const [activeTab, setActiveTab] = useState<
-    "resumen" | "salud" | "cuentas" | "sobres"
-  >("resumen");
+  // Navegación inferior estilo Fintonic (5 pestañas)
+  const [activeTab, setActiveTab] = useState<FintonicTab>("inicio");
 
-  // Modales
+  // Filtros en Movimientos
+  const [txSearch, setTxSearch] = useState("");
+  const [txFilter, setTxFilter] = useState<"all" | "expense" | "income">("all");
+
+  // Modales y edición
   const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
   const [isManualModalOpen, setIsManualModalOpen] = useState(false);
   const [isPhoneModalOpen, setIsPhoneModalOpen] = useState(false);
@@ -89,18 +99,20 @@ export default function FamilyFinanceDashboard() {
   const [isAddingBill, setIsAddingBill] = useState(false);
   const [editingBalanceId, setEditingBalanceId] = useState<string | null>(null);
   const [tempBalanceValue, setTempBalanceValue] = useState<string>("");
+  const [syncingAccountId, setSyncingAccountId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
-  // Formulario de nuevo recibo fijo con custom_code
+  // Nuevo recibo fijo
   const [newBillCode, setNewBillCode] = useState("REC-LUZ");
   const [newBillName, setNewBillName] = useState("");
   const [newBillAmount, setNewBillAmount] = useState("");
   const [newBillAccountId, setNewBillAccountId] = useState("");
 
-  // Alertas Push disparadas en la sesión del usuario
+  // Alertas y banner PSD2
   const [pushAlertsFeed, setPushAlertsFeed] = useState<
     { id: string; title: string; body: string; threshold: 80 | 100 }[]
   >([]);
-  const [psd2Banner, setPsd2Banner] = useState<{
+  const [statusBanner, setStatusBanner] = useState<{
     type: "success" | "error";
     text: string;
   } | null>(null);
@@ -112,22 +124,21 @@ export default function FamilyFinanceDashboard() {
       }
       const params = new URLSearchParams(window.location.search);
       if (params.get("psd2_connected") === "true") {
-        setPsd2Banner({
+        setStatusBanner({
           type: "success",
-          text: `¡Cuenta de ${params.get("bank") || "imagin"} conectada con éxito! Ya puedes pulsar "Mi Banco / CSV -> Sincronizar" para descargar tus movimientos.`,
+          text: `¡Cuenta de ${params.get("bank") || "imagin"} conectada! Pulsa el icono de sincronizar 🔄 en tu cuenta para descargar tus movimientos.`,
         });
         window.history.replaceState({}, "", "/");
       } else if (params.get("psd2_error")) {
-        setPsd2Banner({
+        setStatusBanner({
           type: "error",
-          text: `No se pudo completar la conexión bancaria (${params.get("psd2_error")}). Asegúrate de elegir "imagin" en la pestaña 3. PSD2 Online.`,
+          text: `Error al conectar el banco (${params.get("psd2_error")}). Verifica tus credenciales de Enable Banking en Vercel.`,
         });
         window.history.replaceState({}, "", "/");
       }
     }
   }, []);
 
-  // Cargar únicamente los datos reales de Supabase del usuario autenticado
   const loadPrivateUserData = useCallback(async () => {
     try {
       const res = await fetch("/api/user-data", { cache: "no-store" });
@@ -142,11 +153,9 @@ export default function FamilyFinanceDashboard() {
         setAccounts(data.accounts || []);
         setFixedBills(data.fixedBills || []);
         setTransactions(data.transactions || []);
-        if (data.envelopes) {
-          setEnvelopes(data.envelopes);
-        }
-        if (data.accounts?.length > 0 && !newBillAccountId) {
-          setNewBillAccountId(data.accounts[0].id);
+        if (data.envelopes) setEnvelopes(data.envelopes);
+        if (data.accounts?.length > 0) {
+          setNewBillAccountId((prev) => prev || data.accounts[0].id);
         }
       } else {
         setCurrentUser(null);
@@ -156,13 +165,13 @@ export default function FamilyFinanceDashboard() {
     } finally {
       setLoadingSession(false);
     }
-  }, [newBillAccountId]);
+  }, []);
 
   useEffect(() => {
     loadPrivateUserData();
   }, [loadPrivateUserData]);
 
-  // Cálculos matemáticos privados del usuario (empiezan en 0,00 € si no hay cuentas/movimientos)
+  // Cálculos principales
   const metrics = useMemo(() => {
     const totalBalance = accounts.reduce(
       (acc, a) => acc + Number(a.current_balance || 0),
@@ -181,13 +190,20 @@ export default function FamilyFinanceDashboard() {
         ? 0
         : totalBalance - pendingBillsTotal - savingsGoal;
 
-    const liquidityAfterBills = totalBalance - pendingBillsTotal;
-    const hasOverdraftRisk = accounts.length > 0 && liquidityAfterBills < 0;
+    const currentMonthPrefix = new Date().toISOString().slice(0, 7);
+    const monthTxs = transactions.filter((t) =>
+      String(t.date || "").startsWith(currentMonthPrefix)
+    );
+    const monthIncome = monthTxs
+      .filter((t) => t.type === "income")
+      .reduce((acc, t) => acc + Number(t.amount || 0), 0);
+    const monthExpenses = monthTxs
+      .filter((t) => t.type === "expense")
+      .reduce((acc, t) => acc + Number(t.amount || 0), 0);
 
     const confirmedExpenses = transactions.filter(
       (t) => t.type === "expense" && !t.needs_review
     );
-
     const sumEnv = (keys: EnvelopeCategory[]) =>
       confirmedExpenses
         .filter((t) => keys.includes(t.envelope))
@@ -196,7 +212,6 @@ export default function FamilyFinanceDashboard() {
     const buildEnvelope = (
       key: EnvelopeCategory,
       label: string,
-      subtitle: string,
       spent: number,
       limit: number
     ) => {
@@ -208,7 +223,7 @@ export default function FamilyFinanceDashboard() {
           : percentage >= 80
           ? "warning80"
           : "safe";
-      return { key, label, subtitle, spent, limit, percentage, status };
+      return { key, label, spent, limit, percentage, status };
     };
 
     const freeLimit =
@@ -219,29 +234,25 @@ export default function FamilyFinanceDashboard() {
     const envelopeList = [
       buildEnvelope(
         "hormiga",
-        "Mis Gastos Hormiga",
-        "Cafeterías, bares, panaderías y pequeños compras rápidas",
+        "Gastos Hormiga",
         sumEnv(["hormiga"]),
         Number(envelopes.ant_expenses_limit)
       ),
       buildEnvelope(
         "necesario",
         "Supermercado y Necesarios",
-        "Alimentación, farmacia y básicos del mes",
         sumEnv(["necesario"]),
         Number(envelopes.groceries_limit)
       ),
       buildEnvelope(
         currentUser?.role === "esposa" ? "libre_esposa" : "libre_esposo",
-        "Mi Gasto Libre Personal",
-        "Caprichos, ropa, deporte y ocio personal",
+        "Gasto Libre Personal",
         sumEnv(["libre_esposo", "libre_esposa", "libre_comun"]),
         freeLimit
       ),
       buildEnvelope(
         "ahorro",
-        "Mi Meta de Ahorro Mensual",
-        "Importe reservado este mes",
+        "Meta de Ahorro Mensual",
         sumEnv(["ahorro"]),
         savingsGoal
       ),
@@ -253,24 +264,36 @@ export default function FamilyFinanceDashboard() {
       paidBillsTotal,
       savingsGoal,
       realFreeMoney,
-      liquidityAfterBills,
-      hasOverdraftRisk,
+      monthIncome,
+      monthExpenses,
       envelopeList,
     };
   }, [accounts, fixedBills, envelopes, transactions, currentUser]);
+
+  const fintonicInsights = useMemo(
+    () => computeFintonicInsights(accounts, fixedBills, transactions, envelopes),
+    [accounts, fixedBills, transactions, envelopes]
+  );
 
   const pendingReviewTransactions = useMemo(
     () => transactions.filter((t) => t.needs_review),
     [transactions]
   );
 
-  // Motor de análisis privado estilo Fintonic (Nota 300-900, Previsión fin de mes, Duplicados y Comisiones)
-  const fintonicInsights = useMemo(
-    () => computeFintonicInsights(accounts, fixedBills, transactions, envelopes),
-    [accounts, fixedBills, transactions, envelopes]
-  );
+  const filteredTransactions = useMemo(() => {
+    return transactions.filter((tx) => {
+      if (txFilter !== "all" && tx.type !== txFilter) return false;
+      if (txSearch.trim()) {
+        const q = txSearch.toLowerCase();
+        const matchConcept = tx.concept.toLowerCase().includes(q);
+        const matchCode = (tx.custom_code || "").toLowerCase().includes(q);
+        const matchEnv = tx.envelope.toLowerCase().includes(q);
+        return matchConcept || matchCode || matchEnv;
+      }
+      return true;
+    });
+  }, [transactions, txFilter, txSearch]);
 
-  // Evaluar umbrales 80% y 100% tras un gasto
   const checkThresholdsAndNotify = async (
     updatedTxs: Transaction[],
     currentEnv: MonthlyEnvelopes
@@ -314,7 +337,6 @@ export default function FamilyFinanceDashboard() {
     }
   };
 
-  // Recargar datos y verificar alertas
   const handleDataChanged = async () => {
     await loadPrivateUserData();
     const res = await fetch("/api/user-data", { cache: "no-store" });
@@ -324,7 +346,96 @@ export default function FamilyFinanceDashboard() {
     }
   };
 
-  // Confirmar compra de supermercado en 1 toque
+  // Eliminar cuenta bancaria (soluciona las cuentas de prueba antiguas)
+  const handleDeleteAccount = async (account: BankAccount) => {
+    if (
+      !window.confirm(
+        `¿Seguro que quieres eliminar "${account.account_alias}" (${account.bank_name}) y sus movimientos asociados?`
+      )
+    ) {
+      return;
+    }
+    setDeletingId(account.id);
+    try {
+      const res = await fetch("/api/user-data", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "delete_bank_account",
+          accountId: account.id,
+        }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        setStatusBanner({
+          type: "success",
+          text: `Cuenta "${account.account_alias}" eliminada correctamente.`,
+        });
+        await loadPrivateUserData();
+      }
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  // Sincronizar cuenta PSD2 directamente desde la tarjeta
+  const handleSyncAccountPSD2 = async (account: BankAccount) => {
+    setSyncingAccountId(account.id);
+    setStatusBanner(null);
+    try {
+      const res = await fetch("/api/enable-banking/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bankAccountId: account.id }),
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        setStatusBanner({
+          type: "error",
+          text: data.error || "No se pudo sincronizar la cuenta.",
+        });
+      } else {
+        setStatusBanner({
+          type: "success",
+          text: `¡Sincronizado ${account.bank_name}! Saldo actual: ${formatEUR(
+            Number(data.currentBalance || 0)
+          )} (${(data.newTransactions || []).length} movimientos).`,
+        });
+        await handleDataChanged();
+      }
+    } finally {
+      setSyncingAccountId(null);
+    }
+  };
+
+  const handleDeleteTransaction = async (txId: string) => {
+    setDeletingId(txId);
+    try {
+      await fetch("/api/user-data", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "delete_transaction", txId }),
+      });
+      await loadPrivateUserData();
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  const handleDeleteFixedBill = async (billId: string) => {
+    setDeletingId(billId);
+    try {
+      await fetch("/api/user-data", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "delete_fixed_bill", billId }),
+      });
+      await loadPrivateUserData();
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
   const handleConfirmSupermarketTx = async (
     tx: Transaction,
     choice: "necesario" | "hormiga" | "mi_libre"
@@ -345,11 +456,9 @@ export default function FamilyFinanceDashboard() {
         envelope: targetEnvelope,
       }),
     });
-
     await handleDataChanged();
   };
 
-  // Guardar saldo editado de una cuenta
   const handleSaveAccountBalance = async (accountId: string) => {
     const val = parseFloat(tempBalanceValue.replace(",", "."));
     if (!isNaN(val)) {
@@ -367,29 +476,22 @@ export default function FamilyFinanceDashboard() {
     setEditingBalanceId(null);
   };
 
-  // Guardar límites de sobres mensuales en Supabase
   const handleSaveEnvelopes = async () => {
     await fetch("/api/user-data", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        action: "save_envelopes",
-        envelopes,
-      }),
+      body: JSON.stringify({ action: "save_envelopes", envelopes }),
     });
     setIsEditingEnvelopes(false);
     await loadPrivateUserData();
   };
 
-  // Crear nuevo recibo fijo en Supabase
   const handleCreateFixedBill = async (e: React.FormEvent) => {
     e.preventDefault();
     const targetAccId = newBillAccountId || accounts[0]?.id;
     if (!targetAccId) return;
-
     const numericAmount = parseFloat(newBillAmount.replace(",", "."));
-    if (!newBillName.trim() || isNaN(numericAmount) || numericAmount <= 0)
-      return;
+    if (!newBillName.trim() || isNaN(numericAmount) || numericAmount <= 0) return;
 
     await fetch("/api/user-data", {
       method: "POST",
@@ -403,7 +505,6 @@ export default function FamilyFinanceDashboard() {
         matchKeyword: newBillName.trim().toUpperCase(),
       }),
     });
-
     setNewBillName("");
     setNewBillAmount("");
     setNewBillCode("REC-FIJO");
@@ -411,7 +512,6 @@ export default function FamilyFinanceDashboard() {
     await loadPrivateUserData();
   };
 
-  // Alternar Pagado / Pendiente en un recibo fijo
   const handleToggleFixedBill = async (bill: FixedBill) => {
     await fetch("/api/user-data", {
       method: "POST",
@@ -425,7 +525,6 @@ export default function FamilyFinanceDashboard() {
     await loadPrivateUserData();
   };
 
-  // Cerrar sesión
   const handleLogout = async () => {
     const supabase = createClient();
     await supabase.auth.signOut();
@@ -437,238 +536,417 @@ export default function FamilyFinanceDashboard() {
 
   if (loadingSession) {
     return (
-      <div className="min-h-screen bg-[#070b14] text-slate-100 flex items-center justify-center">
-        <div className="flex items-center gap-3 text-sm text-slate-300">
-          <Loader2 className="w-5 h-5 animate-spin text-emerald-400" />
-          <span>Cargando tu espacio privado...</span>
-        </div>
+      <div className="min-h-screen bg-black text-white flex items-center justify-center">
+        <Loader2 className="w-6 h-6 animate-spin text-[#00D084]" />
       </div>
     );
   }
 
-  // Si no ha iniciado sesión, mostrar obligatoriamente la pantalla de Crear Usuario / Login
   if (!currentUser) {
     return <PrivateAuthScreen onAuthenticated={loadPrivateUserData} />;
   }
 
+  const criticalAlertsCount = fintonicInsights.alerts.filter(
+    (a) => a.severity === "critical"
+  ).length;
+  const userInitial = (currentUser.display_name || "U").charAt(0).toUpperCase();
+
   return (
-    <div className="min-h-screen bg-[#070b14] text-slate-100 pb-24">
+    <div className="min-h-screen bg-black text-white pb-24">
       {/* =====================================================================
-          CABECERA INDIVIDUAL PRIVADA DEL USUARIO AUTENTICADO
+          HEADER MINIMALISTA ESTILO FINTONIC (NEGRO PURO OLED)
          ===================================================================== */}
-      <header className="sticky top-0 z-30 backdrop-blur-xl bg-[#070b14]/90 border-b border-slate-800/80">
-        <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center shadow-lg shadow-emerald-900/30">
-              <Wallet className="w-5 h-5 text-slate-950" />
+      <header className="sticky top-0 z-30 bg-black/90 backdrop-blur-xl border-b border-zinc-900">
+        <div className="max-w-xl mx-auto px-4 py-3.5 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-full bg-[#00D084]/15 border border-[#00D084]/40 text-[#00D084] flex items-center justify-center font-bold text-sm">
+              {userInitial}
             </div>
             <div>
-              <div className="flex items-center gap-2">
-                <h1 className="text-sm sm:text-base font-bold text-white">
-                  Hola, {currentUser.display_name}
-                </h1>
-                <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
-                  100% Privado
-                </span>
-              </div>
-              <p className="text-[11px] text-slate-400 truncate">
-                {currentUser.email}
-              </p>
+              <h1 className="text-sm font-bold text-white leading-tight">
+                Hola, {currentUser.display_name.split(" ")[0]}
+              </h1>
+              <span className="text-[11px] text-zinc-400">
+                Espacio Privado · Solo tú
+              </span>
             </div>
           </div>
 
-          {/* Botones de Teléfono Móvil + Configurar Banco + Cerrar Sesión */}
           <div className="flex items-center gap-2">
             <button
               type="button"
               onClick={() => setIsPhoneModalOpen(true)}
-              className={`py-2 px-3 rounded-xl border text-xs font-semibold flex items-center gap-1.5 transition ${
-                currentUser.phone
-                  ? "bg-emerald-950/70 border-emerald-600/60 text-emerald-300"
-                  : "bg-amber-500/20 border-amber-500/50 text-amber-200 animate-pulse"
-              }`}
+              title="Mi Teléfono Móvil"
+              className="p-2 rounded-full bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 transition"
             >
-              <Phone className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">
-                {currentUser.phone
-                  ? `Móvil: ${currentUser.phone}`
-                  : "Poner Mi Teléfono"}
-              </span>
-              <span className="sm:hidden">
-                {currentUser.phone ? "Móvil OK" : "Teléfono"}
-              </span>
+              <Phone className="w-4 h-4 text-[#00D084]" />
             </button>
 
             <button
               type="button"
-              onClick={() => setIsSyncModalOpen(true)}
-              className="py-2 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white flex items-center gap-1.5 transition"
+              onClick={() => setActiveTab("alertas")}
+              title="Alertas"
+              className="relative p-2 rounded-full bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 transition"
             >
-              <Building2 className="w-3.5 h-3.5" />
-              <span>
-                {accounts.length === 0 ? "Configurar Mi Banco" : "Mi Banco / CSV"}
-              </span>
+              <Bell className="w-4 h-4" />
+              {criticalAlertsCount > 0 && (
+                <span className="absolute -top-0.5 -right-0.5 w-4 h-4 rounded-full bg-rose-500 text-[10px] font-bold text-white flex items-center justify-center">
+                  {criticalAlertsCount}
+                </span>
+              )}
             </button>
 
             <button
               type="button"
               onClick={handleLogout}
               title="Cerrar sesión"
-              className="p-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 hover:text-white transition"
+              className="p-2 rounded-full bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-400 hover:text-white transition"
             >
               <LogOut className="w-4 h-4" />
             </button>
           </div>
         </div>
-
-        {/* Selector de Pestañas Privadas */}
-        <div className="max-w-5xl mx-auto px-4 pb-3">
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 p-1 rounded-2xl bg-slate-900/95 border border-slate-800">
-            <button
-              type="button"
-              onClick={() => setActiveTab("resumen")}
-              className={`py-2 px-2 rounded-xl text-xs font-semibold transition ${
-                activeTab === "resumen"
-                  ? "bg-emerald-600 text-white shadow"
-                  : "text-slate-400 hover:text-white"
-              }`}
-            >
-              Resumen
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab("salud")}
-              className={`py-2 px-2 rounded-xl text-xs font-semibold transition flex items-center justify-center gap-1.5 ${
-                activeTab === "salud"
-                  ? "bg-emerald-600 text-white shadow"
-                  : "text-slate-400 hover:text-white"
-              }`}
-            >
-              <span>Salud y Alertas</span>
-              {fintonicInsights.alerts.some((a) => a.severity === "critical") && (
-                <span className="px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-rose-500 text-white">
-                  {
-                    fintonicInsights.alerts.filter(
-                      (a) => a.severity === "critical"
-                    ).length
-                  }
-                </span>
-              )}
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab("cuentas")}
-              className={`py-2 px-2 rounded-xl text-xs font-semibold transition flex items-center justify-center gap-1.5 ${
-                activeTab === "cuentas"
-                  ? "bg-emerald-600 text-white shadow"
-                  : "text-slate-400 hover:text-white"
-              }`}
-            >
-              <span>Banco y Recibos ({accounts.length})</span>
-              {metrics.hasOverdraftRisk && (
-                <AlertTriangle className="w-3.5 h-3.5 text-amber-300" />
-              )}
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab("sobres")}
-              className={`py-2 px-2 rounded-xl text-xs font-semibold transition ${
-                activeTab === "sobres"
-                  ? "bg-emerald-600 text-white shadow"
-                  : "text-slate-400 hover:text-white"
-              }`}
-            >
-              Mis Sobres
-            </button>
-          </div>
-        </div>
       </header>
 
-      <main className="max-w-5xl mx-auto px-4 pt-5 space-y-6">
-        {psd2Banner && (
+      {/* =====================================================================
+          CONTENIDO PRINCIPAL (MOBILE-FIRST CENTRADO ESTILO FINTONIC)
+         ===================================================================== */}
+      <main className="max-w-xl mx-auto px-4 pt-4 space-y-5">
+        {statusBanner && (
           <div
-            className={`p-4 rounded-2xl border text-xs flex items-center justify-between gap-3 ${
-              psd2Banner.type === "success"
-                ? "bg-emerald-950/80 border-emerald-500/60 text-emerald-200"
-                : "bg-rose-950/80 border-rose-500/60 text-rose-200"
+            className={`p-3.5 rounded-2xl border text-xs flex items-center justify-between gap-3 ${
+              statusBanner.type === "success"
+                ? "bg-emerald-950/70 border-[#00D084]/40 text-emerald-200"
+                : "bg-rose-950/70 border-rose-500/40 text-rose-200"
             }`}
           >
-            <span>{psd2Banner.text}</span>
+            <span>{statusBanner.text}</span>
             <button
               type="button"
-              onClick={() => setPsd2Banner(null)}
-              className="text-xs underline shrink-0"
+              onClick={() => setStatusBanner(null)}
+              className="underline shrink-0"
             >
-              Cerrar
+              OK
             </button>
           </div>
         )}
+
         {/* ===================================================================
-            PASO A PASO INICIAL SI AÚN NO HA VINCULADO SU CUENTA BANCARIA
+            PESTAÑA 1: INICIO (CLON LAYOUT FINTONIC EN NEGRO PURO)
            =================================================================== */}
-        {accounts.length === 0 && (
-          <section className="rounded-3xl bg-gradient-to-br from-emerald-950/60 via-slate-900 to-slate-900 border-2 border-emerald-500/50 p-6 shadow-xl">
-            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-              <div className="space-y-1.5">
-                <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-500/20 text-emerald-300">
-                  👋 ¡Bienvenido/a a tu panel privado, {currentUser.display_name}!
-                </span>
-                <h2 className="text-lg sm:text-xl font-bold text-white">
-                  Tu cuenta está en 0,00 € lista para empezar
-                </h2>
-                <p className="text-xs text-slate-300 leading-relaxed max-w-2xl">
-                  Aquí no hay datos de prueba ni nadie más puede ver lo que
-                  hagas. Pulsa el botón para añadir tu cuenta bancaria (ej.
-                  CaixaBank, BBVA, Santander) e indicar tu saldo inicial o subir
-                  tu extracto.
-                </p>
+        {activeTab === "inicio" && (
+          <>
+            {/* Hero Saldo Total */}
+            <section className="rounded-3xl bg-[#111216] border border-zinc-800/80 p-5 space-y-4">
+              <div className="flex items-start justify-between">
+                <div>
+                  <span className="text-xs font-medium text-zinc-400">
+                    Saldo total en tus cuentas
+                  </span>
+                  <div className="text-4xl font-extrabold text-white tracking-tight mt-0.5">
+                    {formatEUR(metrics.totalBalance)}
+                  </div>
+                  <div className="text-xs text-zinc-400 mt-1">
+                    Libre real tras recibos y ahorro:{" "}
+                    <span className="text-[#00D084] font-semibold">
+                      {formatEUR(metrics.realFreeMoney)}
+                    </span>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("finscore")}
+                  className="px-2.5 py-1 rounded-full bg-zinc-900 border border-zinc-800 text-[11px] font-bold text-[#00D084] flex items-center gap-1"
+                >
+                  <Award className="w-3.5 h-3.5" />
+                  {fintonicInsights.hasData
+                    ? `${fintonicInsights.finScore} pts`
+                    : "FinScore"}
+                </button>
               </div>
 
-              <div className="flex flex-wrap gap-2.5 shrink-0">
+              {/* Dos tarjetas compactas: Ingresos vs Gastos del mes */}
+              <div className="grid grid-cols-2 gap-2.5">
+                <div className="rounded-2xl bg-black/70 border border-zinc-800/80 p-3">
+                  <div className="flex items-center gap-1.5 text-[11px] text-zinc-400">
+                    <ArrowDownLeft className="w-3.5 h-3.5 text-[#00D084]" />
+                    <span>Ingresos mes</span>
+                  </div>
+                  <div className="text-base font-bold text-[#00D084] mt-1">
+                    +{formatEUR(metrics.monthIncome)}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl bg-black/70 border border-zinc-800/80 p-3">
+                  <div className="flex items-center gap-1.5 text-[11px] text-zinc-400">
+                    <ArrowUpRight className="w-3.5 h-3.5 text-rose-400" />
+                    <span>Gastos mes</span>
+                  </div>
+                  <div className="text-base font-bold text-white mt-1">
+                    −{formatEUR(metrics.monthExpenses)}
+                  </div>
+                </div>
+              </div>
+
+              {/* Acciones rápidas estilo Fintonic */}
+              <div className="grid grid-cols-2 gap-2.5 pt-1">
                 <button
                   type="button"
                   onClick={() => setIsSyncModalOpen(true)}
-                  className="py-3 px-5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-emerald-950/60 transition"
+                  className="py-2.5 px-3 rounded-2xl bg-[#00D084] hover:bg-[#00b874] text-black text-xs font-bold flex items-center justify-center gap-1.5 transition"
                 >
                   <Building2 className="w-4 h-4" />
-                  1. Configurar Mi Cuenta Bancaria
+                  Conectar / Subir CSV
                 </button>
-
                 <button
                   type="button"
-                  onClick={() => setIsPhoneModalOpen(true)}
-                  className="py-3 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-2 transition"
+                  onClick={() =>
+                    accounts.length === 0
+                      ? setIsSyncModalOpen(true)
+                      : setIsManualModalOpen(true)
+                  }
+                  className="py-2.5 px-3 rounded-2xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition"
                 >
-                  <Phone className="w-4 h-4 text-emerald-400" />
-                  2. Verificar Mi Teléfono
+                  <Plus className="w-4 h-4 text-[#00D084]" />
+                  Añadir gasto/ingreso
                 </button>
               </div>
-            </div>
-          </section>
+            </section>
+
+            {/* Sección Mis Cuentas Bancarias (CON BOTÓN ELIMINAR + SINCRONIZAR) */}
+            <section className="space-y-2.5">
+              <div className="flex items-center justify-between px-1">
+                <h2 className="text-sm font-bold text-white">
+                  Mis Cuentas ({accounts.length})
+                </h2>
+                <button
+                  type="button"
+                  onClick={() => setIsSyncModalOpen(true)}
+                  className="text-xs font-semibold text-[#00D084]"
+                >
+                  + Añadir cuenta
+                </button>
+              </div>
+
+              {accounts.length === 0 ? (
+                <div className="rounded-3xl bg-[#111216] border border-zinc-800/80 p-5 text-center space-y-2">
+                  <p className="text-xs text-zinc-400">
+                    No tienes ninguna cuenta vinculada todavía. Todo está limpio en{" "}
+                    <strong className="text-white">0,00 €</strong>.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setIsSyncModalOpen(true)}
+                    className="py-2 px-4 rounded-xl bg-[#00D084] text-black text-xs font-bold"
+                  >
+                    Conectar mi cuenta de imagin
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-2.5">
+                  {accounts.map((acc) => (
+                    <div
+                      key={acc.id}
+                      className="rounded-2xl bg-[#111216] border border-zinc-800/80 p-4 flex items-center justify-between gap-3"
+                    >
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-bold text-[#00D084]">
+                            {acc.bank_name}
+                          </span>
+                          {acc.enable_banking_account_id && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-900 text-zinc-300 border border-zinc-800">
+                              PSD2
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-sm font-semibold text-white truncate">
+                          {acc.account_alias}
+                        </div>
+                        <div className="text-[11px] font-mono text-zinc-500">
+                          {acc.iban_masked}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 shrink-0">
+                        {editingBalanceId === acc.id ? (
+                          <div className="flex items-center gap-1">
+                            <input
+                              type="number"
+                              step="0.01"
+                              value={tempBalanceValue}
+                              onChange={(e) => setTempBalanceValue(e.target.value)}
+                              className="w-20 rounded-lg bg-black border border-zinc-700 px-2 py-1 text-xs text-white"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => handleSaveAccountBalance(acc.id)}
+                              className="px-2 py-1 rounded-lg bg-[#00D084] text-black text-xs font-bold"
+                            >
+                              OK
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="text-right">
+                            <div className="text-base font-extrabold text-white">
+                              {formatEUR(Number(acc.current_balance))}
+                            </div>
+                            <div className="flex items-center justify-end gap-2 mt-1">
+                              {acc.enable_banking_account_id && (
+                                <button
+                                  type="button"
+                                  disabled={syncingAccountId === acc.id}
+                                  onClick={() => handleSyncAccountPSD2(acc)}
+                                  title="Sincronizar con el banco"
+                                  className="text-zinc-400 hover:text-[#00D084]"
+                                >
+                                  <RefreshCw
+                                    className={`w-3.5 h-3.5 ${
+                                      syncingAccountId === acc.id ? "animate-spin" : ""
+                                    }`}
+                                  />
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditingBalanceId(acc.id);
+                                  setTempBalanceValue(String(acc.current_balance));
+                                }}
+                                title="Editar saldo"
+                                className="text-zinc-400 hover:text-white"
+                              >
+                                <Edit3 className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                disabled={deletingId === acc.id}
+                                onClick={() => handleDeleteAccount(acc)}
+                                title="Eliminar esta cuenta"
+                                className="text-zinc-500 hover:text-rose-400"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+
+            {/* Bandeja de Supermercado en 1 toque (solo si hay pendientes) */}
+            {pendingReviewTransactions.length > 0 && (
+              <section className="rounded-3xl bg-[#111216] border border-amber-500/40 p-4 space-y-3">
+                <div className="flex items-center gap-2 text-xs font-bold text-amber-300">
+                  <ShoppingCart className="w-4 h-4" />
+                  <span>
+                    Confirma tus compras de supermercado ({pendingReviewTransactions.length})
+                  </span>
+                </div>
+                {pendingReviewTransactions.map((tx) => (
+                  <div
+                    key={tx.id}
+                    className="rounded-2xl bg-black border border-zinc-800 p-3 space-y-2.5"
+                  >
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="font-bold text-white truncate">
+                        {tx.concept}
+                      </span>
+                      <span className="font-extrabold text-amber-300 shrink-0">
+                        {formatEUR(tx.amount)}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => handleConfirmSupermarketTx(tx, "necesario")}
+                        className="py-2 rounded-xl bg-[#00D084]/15 text-[#00D084] text-[11px] font-bold flex items-center justify-center gap-1"
+                      >
+                        <ShoppingCart className="w-3 h-3" />
+                        Necesaria
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleConfirmSupermarketTx(tx, "hormiga")}
+                        className="py-2 rounded-xl bg-amber-500/15 text-amber-300 text-[11px] font-bold flex items-center justify-center gap-1"
+                      >
+                        <Coffee className="w-3 h-3" />
+                        Hormiga
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleConfirmSupermarketTx(tx, "mi_libre")}
+                        className="py-2 rounded-xl bg-indigo-500/15 text-indigo-300 text-[11px] font-bold flex items-center justify-center gap-1"
+                      >
+                        <ShoppingBag className="w-3 h-3" />
+                        Mi Libre
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </section>
+            )}
+
+            {/* Últimos movimientos */}
+            <section className="space-y-2.5">
+              <div className="flex items-center justify-between px-1">
+                <h2 className="text-sm font-bold text-white">
+                  Últimos movimientos
+                </h2>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("movimientos")}
+                  className="text-xs font-semibold text-[#00D084]"
+                >
+                  Ver todos
+                </button>
+              </div>
+
+              {transactions.length === 0 ? (
+                <div className="rounded-2xl bg-[#111216] border border-zinc-800/80 p-5 text-center text-xs text-zinc-500">
+                  Sin movimientos todavía.
+                </div>
+              ) : (
+                <div className="rounded-3xl bg-[#111216] border border-zinc-800/80 divide-y divide-zinc-800/70">
+                  {transactions.slice(0, 5).map((tx) => (
+                    <div
+                      key={tx.id}
+                      className="p-3.5 flex items-center justify-between gap-3"
+                    >
+                      <div className="min-w-0">
+                        <div className="text-xs font-bold text-white truncate">
+                          {tx.concept}
+                        </div>
+                        <div className="text-[11px] text-zinc-500 mt-0.5">
+                          {tx.date} · {tx.envelope.replace("_", " ")}
+                        </div>
+                      </div>
+                      <div
+                        className={`text-sm font-bold shrink-0 ${
+                          tx.type === "income" ? "text-[#00D084]" : "text-white"
+                        }`}
+                      >
+                        {tx.type === "income" ? "+" : "-"}
+                        {formatEUR(tx.amount)}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+          </>
         )}
 
         {/* ===================================================================
-            TARJETA PRINCIPAL: MI DINERO REAL LIBRE PRIVADO
+            PESTAÑA 2: MOVIMIENTOS (BUSCADOR + FILTROS + BORRAR)
            =================================================================== */}
-        <section className="rounded-3xl bg-gradient-to-br from-slate-900 via-slate-900 to-emerald-950/30 border border-slate-800 p-5 sm:p-6 shadow-xl">
-          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-            <div>
-              <span className="inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-emerald-400">
-                <Sparkles className="w-3.5 h-3.5" />
-                Mi Dinero Real Libre Disponible
-              </span>
-              <div className="text-3xl sm:text-4xl font-extrabold text-white mt-1 tracking-tight">
-                {formatEUR(metrics.realFreeMoney)}
-              </div>
-              <p className="text-xs text-slate-400 mt-1">
-                Calculado sobre tus cuentas privadas:{" "}
-                <code className="text-slate-300">
-                  Mi Saldo Banco − Mis Recibos Pendientes − Mi Meta de Ahorro
-                </code>
-              </p>
-            </div>
-
-            <div className="flex flex-wrap gap-2">
+        {activeTab === "movimientos" && (
+          <section className="space-y-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-bold text-white">Movimientos</h2>
               <button
                 type="button"
                 onClick={() =>
@@ -676,535 +954,85 @@ export default function FamilyFinanceDashboard() {
                     ? setIsSyncModalOpen(true)
                     : setIsManualModalOpen(true)
                 }
-                className="py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center gap-1.5 shadow-lg shadow-emerald-950/50 transition"
+                className="py-2 px-3 rounded-xl bg-[#00D084] text-black text-xs font-bold flex items-center gap-1"
               >
-                <Plus className="w-4 h-4" />
-                Registrar Mi Gasto / Ingreso
+                <Plus className="w-3.5 h-3.5" />
+                Nuevo
               </button>
             </div>
-          </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-5">
-            <div className="rounded-2xl bg-slate-950/75 border border-slate-800 p-4">
-              <div className="flex items-center justify-between text-xs text-emerald-400 font-medium">
-                <span>Mi Saldo Actual en Banco</span>
-                <Building2 className="w-3.5 h-3.5" />
-              </div>
-              <div className="text-xl font-bold text-white mt-1">
-                {formatEUR(metrics.totalBalance)}
-              </div>
-              <div className="text-[11px] text-slate-400 mt-0.5">
-                {accounts.length === 0
-                  ? "Sin cuenta configurada aún"
-                  : `${accounts.length} cuenta(s) activa(s)`}
-              </div>
+            <div className="relative">
+              <Search className="w-4 h-4 text-zinc-500 absolute left-3.5 top-3" />
+              <input
+                type="text"
+                value={txSearch}
+                onChange={(e) => setTxSearch(e.target.value)}
+                placeholder="Buscar comercio, código o categoría..."
+                className="w-full rounded-2xl bg-[#111216] border border-zinc-800 pl-10 pr-4 py-2.5 text-xs text-white focus:border-[#00D084] focus:outline-none"
+              />
             </div>
 
-            <div className="rounded-2xl bg-slate-950/75 border border-slate-800 p-4">
-              <div className="flex items-center justify-between text-xs text-amber-400 font-medium">
-                <span>− Mis Recibos Fijos Pendientes</span>
-                <Receipt className="w-3.5 h-3.5" />
-              </div>
-              <div className="text-xl font-bold text-amber-300 mt-1">
-                −{formatEUR(metrics.pendingBillsTotal)}
-              </div>
-              <div className="text-[11px] text-slate-400 mt-0.5">
-                Pagados este mes: {formatEUR(metrics.paidBillsTotal)}
-              </div>
-            </div>
-
-            <div className="rounded-2xl bg-slate-950/75 border border-slate-800 p-4">
-              <div className="flex items-center justify-between text-xs text-teal-400 font-medium">
-                <span>− Mi Meta de Ahorro Mensual</span>
-                <Wallet className="w-3.5 h-3.5" />
-              </div>
-              <div className="text-xl font-bold text-teal-300 mt-1">
-                −{formatEUR(metrics.savingsGoal)}
-              </div>
-              <div className="text-[11px] text-slate-400 mt-0.5">
-                Configurable en Mis Sobres
-              </div>
-            </div>
-          </div>
-
-          {metrics.hasOverdraftRisk && (
-            <div className="mt-4 p-4 rounded-2xl bg-rose-950/90 border border-rose-500 flex items-start gap-3">
-              <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
-              <div className="text-xs text-rose-200">
-                <strong>🚨 Alerta de Liquidez en tu Cuenta:</strong> Tu saldo
-                actual ({formatEUR(metrics.totalBalance)}) no alcanza para cubrir
-                tus recibos fijos pendientes (
-                {formatEUR(metrics.pendingBillsTotal)}). Faltan{" "}
-                <strong>{formatEUR(Math.abs(metrics.liquidityAfterBills))}</strong>.
-              </div>
-            </div>
-          )}
-        </section>
-
-        {/* ===================================================================
-            PANEL ESTILO FINTONIC: NOTA 300-900, PREVISIÓN Y RADAR DE ALERTAS
-           =================================================================== */}
-        {(activeTab === "resumen" || activeTab === "salud") && (
-          <FintonicInsightsPanel insights={fintonicInsights} />
-        )}
-
-        {/* ===================================================================
-            MIS CUENTAS BANCARIAS CONFIGURADAS (CON EDITOR DE SALDO)
-           =================================================================== */}
-        {(activeTab === "resumen" || activeTab === "cuentas") &&
-          accounts.length > 0 && (
-            <section className="rounded-3xl bg-slate-900/90 border border-slate-800 p-5 shadow-lg space-y-3">
-              <div className="flex items-center justify-between">
-                <h2 className="text-base font-bold text-white flex items-center gap-2">
-                  <Building2 className="w-5 h-5 text-emerald-400" />
-                  Mis Cuentas Bancarias Privadas
-                </h2>
+            <div className="grid grid-cols-3 gap-2">
+              {(["all", "expense", "income"] as const).map((f) => (
                 <button
+                  key={f}
                   type="button"
-                  onClick={() => setIsSyncModalOpen(true)}
-                  className="text-xs text-emerald-400 hover:underline font-semibold"
+                  onClick={() => setTxFilter(f)}
+                  className={`py-2 rounded-xl text-xs font-semibold border transition ${
+                    txFilter === f
+                      ? "bg-[#00D084]/15 border-[#00D084] text-[#00D084]"
+                      : "bg-[#111216] border-zinc-800 text-zinc-400"
+                  }`}
                 >
-                  + Añadir otra cuenta o subir CSV
+                  {f === "all" ? "Todos" : f === "expense" ? "Gastos" : "Ingresos"}
                 </button>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                {accounts.map((acc) => (
-                  <div
-                    key={acc.id}
-                    className="rounded-2xl bg-slate-950 border border-slate-800 p-4 flex items-center justify-between gap-3"
-                  >
-                    <div>
-                      <span className="text-[11px] font-semibold text-emerald-400">
-                        {acc.bank_name}
-                      </span>
-                      <div className="text-sm font-bold text-white">
-                        {acc.account_alias}
-                      </div>
-                      <div className="text-xs font-mono text-slate-400 mt-0.5">
-                        {acc.iban_masked}
-                      </div>
-                    </div>
-
-                    <div className="text-right">
-                      {editingBalanceId === acc.id ? (
-                        <div className="flex items-center gap-1.5">
-                          <input
-                            type="number"
-                            step="0.01"
-                            value={tempBalanceValue}
-                            onChange={(e) => setTempBalanceValue(e.target.value)}
-                            className="w-24 rounded-lg bg-slate-900 border border-slate-700 px-2 py-1 text-sm text-white"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => handleSaveAccountBalance(acc.id)}
-                            className="px-2.5 py-1 rounded-lg bg-emerald-600 text-xs font-bold text-white"
-                          >
-                            OK
-                          </button>
-                        </div>
-                      ) : (
-                        <>
-                          <div className="text-lg font-extrabold text-white">
-                            {formatEUR(Number(acc.current_balance))}
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setEditingBalanceId(acc.id);
-                              setTempBalanceValue(String(acc.current_balance));
-                            }}
-                            className="text-[11px] text-emerald-400 hover:underline inline-flex items-center gap-1"
-                          >
-                            <Edit3 className="w-3 h-3" />
-                            Actualizar saldo
-                          </button>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </section>
-          )}
-
-        {/* ===================================================================
-            BANDEJA DE CONFIRMACIÓN DE SUPERMERCADO (1 TOQUE)
-           =================================================================== */}
-        {pendingReviewTransactions.length > 0 && (
-          <section className="rounded-3xl bg-slate-900/90 border border-amber-500/40 p-5 shadow-lg">
-            <div className="flex items-center gap-2.5 mb-4">
-              <div className="w-9 h-9 rounded-xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center">
-                <ShoppingCart className="w-5 h-5 text-amber-400" />
-              </div>
-              <div>
-                <h2 className="text-base font-bold text-white">
-                  Confirmación de Supermercado ({pendingReviewTransactions.length})
-                </h2>
-                <p className="text-xs text-slate-400">
-                  Elige con 1 toque a qué sobre va cada compra de supermercado:
-                </p>
-              </div>
-            </div>
-
-            <div className="space-y-3">
-              {pendingReviewTransactions.map((tx) => (
-                <div
-                  key={tx.id}
-                  className="rounded-2xl bg-slate-950/90 border border-slate-800 p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-4"
-                >
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs font-mono px-2 py-0.5 rounded bg-slate-900 text-emerald-300 border border-slate-800">
-                        {tx.custom_code || "SUP-01"}
-                      </span>
-                      <span className="text-xs text-slate-400">{tx.date}</span>
-                    </div>
-                    <div className="flex items-baseline gap-3 mt-1">
-                      <h3 className="text-sm font-bold text-white">
-                        {tx.concept}
-                      </h3>
-                      <span className="text-base font-extrabold text-amber-300">
-                        {formatEUR(tx.amount)}
-                      </span>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-3 gap-2 shrink-0">
-                    <button
-                      type="button"
-                      onClick={() => handleConfirmSupermarketTx(tx, "necesario")}
-                      className="py-2 px-3 rounded-xl bg-emerald-600/20 hover:bg-emerald-600 border border-emerald-500/50 text-emerald-200 hover:text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition"
-                    >
-                      <ShoppingCart className="w-3.5 h-3.5" />
-                      <span>Necesaria</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleConfirmSupermarketTx(tx, "hormiga")}
-                      className="py-2 px-3 rounded-xl bg-amber-600/20 hover:bg-amber-600 border border-amber-500/50 text-amber-200 hover:text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition"
-                    >
-                      <Coffee className="w-3.5 h-3.5" />
-                      <span>Hormiga</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleConfirmSupermarketTx(tx, "mi_libre")}
-                      className="py-2 px-3 rounded-xl bg-indigo-600/20 hover:bg-indigo-600 border border-indigo-500/50 text-indigo-200 hover:text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition"
-                    >
-                      <ShoppingBag className="w-3.5 h-3.5" />
-                      <span>Mi Libre</span>
-                    </button>
-                  </div>
-                </div>
               ))}
             </div>
-          </section>
-        )}
 
-        {/* ===================================================================
-            MIS SOBRES MENSUALES PRIVADOS (EDITABLES)
-           =================================================================== */}
-        {(activeTab === "resumen" || activeTab === "sobres") && (
-          <section className="rounded-3xl bg-slate-900/90 border border-slate-800 p-5 shadow-lg">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
-              <div>
-                <h2 className="text-base font-bold text-white">
-                  Mis Sobres Mensuales
-                </h2>
-                <p className="text-xs text-slate-400">
-                  Recibirás un aviso en tu móvil ({currentUser.phone || "sin configurar"}) al llegar al 80% y al 100%.
-                </p>
-              </div>
-
-              <button
-                type="button"
-                onClick={() =>
-                  isEditingEnvelopes
-                    ? handleSaveEnvelopes()
-                    : setIsEditingEnvelopes(true)
-                }
-                className="self-start sm:self-auto py-2 px-3.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-emerald-300 flex items-center gap-1.5 transition"
-              >
-                {isEditingEnvelopes ? (
-                  <>
-                    <Save className="w-3.5 h-3.5" />
-                    Guardar Mis Límites
-                  </>
-                ) : (
-                  <>
-                    <Edit3 className="w-3.5 h-3.5" />
-                    Editar Límites de Mis Sobres
-                  </>
-                )}
-              </button>
-            </div>
-
-            {isEditingEnvelopes && (
-              <div className="mb-5 p-4 rounded-2xl bg-slate-950 border border-emerald-500/40 grid grid-cols-2 sm:grid-cols-4 gap-3">
-                <div>
-                  <label className="block text-[11px] text-slate-400 mb-1">
-                    🐜 Gastos Hormiga (€)
-                  </label>
-                  <input
-                    type="number"
-                    value={envelopes.ant_expenses_limit}
-                    onChange={(e) =>
-                      setEnvelopes({
-                        ...envelopes,
-                        ant_expenses_limit: Number(e.target.value),
-                      })
-                    }
-                    className="w-full rounded-xl bg-slate-900 border border-slate-700 px-3 py-1.5 text-sm text-white"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] text-slate-400 mb-1">
-                    🛒 Supermercado / Necesarios (€)
-                  </label>
-                  <input
-                    type="number"
-                    value={envelopes.groceries_limit}
-                    onChange={(e) =>
-                      setEnvelopes({
-                        ...envelopes,
-                        groceries_limit: Number(e.target.value),
-                      })
-                    }
-                    className="w-full rounded-xl bg-slate-900 border border-slate-700 px-3 py-1.5 text-sm text-white"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] text-slate-400 mb-1">
-                    🎯 Mi Gasto Libre (€)
-                  </label>
-                  <input
-                    type="number"
-                    value={
-                      currentUser.role === "esposa"
-                        ? envelopes.wife_free_limit
-                        : envelopes.husband_free_limit
-                    }
-                    onChange={(e) =>
-                      setEnvelopes({
-                        ...envelopes,
-                        husband_free_limit: Number(e.target.value),
-                        wife_free_limit: Number(e.target.value),
-                      })
-                    }
-                    className="w-full rounded-xl bg-slate-900 border border-slate-700 px-3 py-1.5 text-sm text-white"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] text-slate-400 mb-1">
-                    🐷 Mi Meta de Ahorro (€)
-                  </label>
-                  <input
-                    type="number"
-                    value={envelopes.savings_goal}
-                    onChange={(e) =>
-                      setEnvelopes({
-                        ...envelopes,
-                        savings_goal: Number(e.target.value),
-                      })
-                    }
-                    className="w-full rounded-xl bg-slate-900 border border-slate-700 px-3 py-1.5 text-sm text-white"
-                  />
-                </div>
-              </div>
-            )}
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
-              {metrics.envelopeList.map((env) => {
-                const barColor =
-                  env.key === "ahorro"
-                    ? "bg-teal-500"
-                    : env.status === "exceeded100"
-                    ? "bg-rose-500"
-                    : env.status === "warning80"
-                    ? "bg-amber-500"
-                    : "bg-emerald-500";
-
-                return (
-                  <div
-                    key={env.key}
-                    className="rounded-2xl bg-slate-950/80 border border-slate-800/90 p-4 space-y-2.5"
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <div>
-                        <h3 className="text-sm font-bold text-white">
-                          {env.label}
-                        </h3>
-                        <p className="text-[11px] text-slate-400">
-                          {env.subtitle}
-                        </p>
-                      </div>
-                      <div className="text-right">
-                        <div className="text-sm font-extrabold text-white">
-                          {formatEUR(env.spent)}{" "}
-                          <span className="text-xs font-normal text-slate-400">
-                            / {formatEUR(env.limit)}
-                          </span>
-                        </div>
-                        <div className="text-[11px] text-slate-400">
-                          {env.percentage}% usado
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="relative h-3 w-full rounded-full bg-slate-800 overflow-hidden">
-                      <div
-                        className={`h-full rounded-full transition-all duration-500 ${barColor}`}
-                        style={{ width: `${Math.min(env.percentage, 100)}%` }}
-                      />
-                      <div
-                        className="absolute top-0 bottom-0 w-0.5 bg-white/40"
-                        style={{ left: "80%" }}
-                      />
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </section>
-        )}
-
-        {/* ===================================================================
-            CHECKLIST DE MIS RECIBOS FIJOS PRIVADOS CON CÓDIGO
-           =================================================================== */}
-        {(activeTab === "resumen" || activeTab === "cuentas") && (
-          <section className="rounded-3xl bg-slate-900/90 border border-slate-800 p-5 shadow-lg">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
-              <div>
-                <h2 className="text-base font-bold text-white flex items-center gap-2">
-                  <Receipt className="w-5 h-5 text-emerald-400" />
-                  Mis Recibos Fijos Mensuales
-                </h2>
-                <p className="text-xs text-slate-400">
-                  Añade tus recibos domiciliados (luz, alquiler, internet, etc.)
-                  para descontarlos automáticamente de tu saldo libre.
-                </p>
-              </div>
-
-              <button
-                type="button"
-                onClick={() =>
-                  accounts.length === 0
-                    ? setIsSyncModalOpen(true)
-                    : setIsAddingBill(!isAddingBill)
-                }
-                className="self-start sm:self-auto py-2 px-3.5 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-xs font-semibold text-emerald-300 flex items-center gap-1.5 transition"
-              >
-                <Plus className="w-4 h-4" />
-                Añadir Mi Recibo Fijo
-              </button>
-            </div>
-
-            {isAddingBill && accounts.length > 0 && (
-              <form
-                onSubmit={handleCreateFixedBill}
-                className="mb-5 p-4 rounded-2xl bg-slate-950 border border-slate-800 grid grid-cols-1 sm:grid-cols-4 gap-3"
-              >
-                <div>
-                  <label className="block text-[11px] text-slate-400 mb-1">
-                    Código (`custom_code`)
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={newBillCode}
-                    onChange={(e) =>
-                      setNewBillCode(e.target.value.toUpperCase())
-                    }
-                    placeholder="REC-LUZ"
-                    className="w-full rounded-xl bg-slate-900 border border-slate-700 px-3 py-2 text-xs font-mono text-emerald-300 uppercase"
-                  />
-                </div>
-                <div className="sm:col-span-2">
-                  <label className="block text-[11px] text-slate-400 mb-1">
-                    Nombre del Recibo
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={newBillName}
-                    onChange={(e) => setNewBillName(e.target.value)}
-                    placeholder="Ej. Endesa Luz / Alquiler / Gimnasio"
-                    className="w-full rounded-xl bg-slate-900 border border-slate-700 px-3 py-2 text-xs text-white"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] text-slate-400 mb-1">
-                    Importe (€)
-                  </label>
-                  <div className="flex gap-1.5">
-                    <input
-                      type="number"
-                      step="0.01"
-                      required
-                      value={newBillAmount}
-                      onChange={(e) => setNewBillAmount(e.target.value)}
-                      placeholder="75.00"
-                      className="w-full rounded-xl bg-slate-900 border border-slate-700 px-3 py-2 text-xs text-white"
-                    />
-                    <button
-                      type="submit"
-                      className="px-3.5 py-2 rounded-xl bg-emerald-600 text-xs font-bold text-white"
-                    >
-                      Guardar
-                    </button>
-                  </div>
-                </div>
-              </form>
-            )}
-
-            {fixedBills.length === 0 ? (
-              <div className="rounded-2xl bg-slate-950/60 border border-slate-800 p-5 text-center text-xs text-slate-400">
-                No tienes ningún recibo fijo registrado todavía. Pulsa{" "}
-                <strong>+ Añadir Mi Recibo Fijo</strong> para crear los tuyos.
+            {filteredTransactions.length === 0 ? (
+              <div className="rounded-3xl bg-[#111216] border border-zinc-800 p-6 text-center text-xs text-zinc-500">
+                No hay movimientos que coincidan.
               </div>
             ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                {fixedBills.map((bill) => (
+              <div className="rounded-3xl bg-[#111216] border border-zinc-800 divide-y divide-zinc-800/70">
+                {filteredTransactions.map((tx) => (
                   <div
-                    key={bill.id}
-                    className="rounded-2xl p-4 bg-slate-950 border border-slate-800 flex items-center justify-between gap-3"
+                    key={tx.id}
+                    className="p-3.5 flex items-center justify-between gap-3"
                   >
-                    <div className="space-y-1">
-                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-mono font-bold bg-slate-800 text-emerald-300">
-                        <Tag className="w-3 h-3" />
-                        {bill.custom_code}
-                      </span>
-                      <div className="text-sm font-bold text-white">
-                        {bill.name}
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-bold text-white truncate">
+                          {tx.concept}
+                        </span>
+                        {tx.custom_code && (
+                          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-900 text-[#00D084]">
+                            {tx.custom_code}
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[11px] text-zinc-500 mt-0.5">
+                        {tx.date} · {tx.envelope.replace("_", " ")}
                       </div>
                     </div>
 
-                    <div className="text-right space-y-1.5">
-                      <div className="text-base font-extrabold text-white">
-                        {formatEUR(bill.expected_amount)}
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => handleToggleFixedBill(bill)}
-                        className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition ${
-                          bill.is_paid_this_month
-                            ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
-                            : "bg-amber-500/20 text-amber-300 border border-amber-500/40"
+                    <div className="flex items-center gap-3 shrink-0">
+                      <span
+                        className={`text-sm font-bold ${
+                          tx.type === "income" ? "text-[#00D084]" : "text-white"
                         }`}
                       >
-                        {bill.is_paid_this_month ? (
-                          <>
-                            <CheckCircle2 className="w-3.5 h-3.5" />
-                            Pagado
-                          </>
-                        ) : (
-                          <>
-                            <Clock className="w-3.5 h-3.5" />
-                            Pendiente
-                          </>
-                        )}
+                        {tx.type === "income" ? "+" : "-"}
+                        {formatEUR(tx.amount)}
+                      </span>
+                      <button
+                        type="button"
+                        disabled={deletingId === tx.id}
+                        onClick={() => handleDeleteTransaction(tx.id)}
+                        title="Eliminar movimiento"
+                        className="text-zinc-600 hover:text-rose-400"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
                       </button>
                     </div>
                   </div>
@@ -1215,130 +1043,392 @@ export default function FamilyFinanceDashboard() {
         )}
 
         {/* ===================================================================
-            HISTORIAL PRIVADO DE MOVIMIENTOS Y ALERTAS MÓVILES
+            PESTAÑA 3: PRESUPUESTO (SOBRES + RECIBOS FIJOS + CATEGORÍAS)
            =================================================================== */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <section className="rounded-3xl bg-slate-900/90 border border-slate-800 p-5 space-y-3">
+        {activeTab === "presupuesto" && (
+          <section className="space-y-5">
+            {/* Sobres Editables */}
+            <div className="rounded-3xl bg-[#111216] border border-zinc-800 p-5 space-y-4">
+              <div className="flex items-center justify-between">
+                <h2 className="text-base font-bold text-white">
+                  Presupuestos del Mes
+                </h2>
+                <button
+                  type="button"
+                  onClick={() =>
+                    isEditingEnvelopes
+                      ? handleSaveEnvelopes()
+                      : setIsEditingEnvelopes(true)
+                  }
+                  className="text-xs font-bold text-[#00D084] flex items-center gap-1"
+                >
+                  {isEditingEnvelopes ? (
+                    <>
+                      <Save className="w-3.5 h-3.5" />
+                      Guardar
+                    </>
+                  ) : (
+                    <>
+                      <Edit3 className="w-3.5 h-3.5" />
+                      Editar límites
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {isEditingEnvelopes && (
+                <div className="grid grid-cols-2 gap-2.5 p-3 rounded-2xl bg-black border border-zinc-800">
+                  <div>
+                    <label className="block text-[10px] text-zinc-400 mb-1">
+                      Gastos Hormiga (€)
+                    </label>
+                    <input
+                      type="number"
+                      value={envelopes.ant_expenses_limit}
+                      onChange={(e) =>
+                        setEnvelopes({
+                          ...envelopes,
+                          ant_expenses_limit: Number(e.target.value),
+                        })
+                      }
+                      className="w-full rounded-xl bg-zinc-900 border border-zinc-700 px-2.5 py-1.5 text-xs text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-zinc-400 mb-1">
+                      Supermercado (€)
+                    </label>
+                    <input
+                      type="number"
+                      value={envelopes.groceries_limit}
+                      onChange={(e) =>
+                        setEnvelopes({
+                          ...envelopes,
+                          groceries_limit: Number(e.target.value),
+                        })
+                      }
+                      className="w-full rounded-xl bg-zinc-900 border border-zinc-700 px-2.5 py-1.5 text-xs text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-zinc-400 mb-1">
+                      Gasto Libre (€)
+                    </label>
+                    <input
+                      type="number"
+                      value={envelopes.husband_free_limit}
+                      onChange={(e) =>
+                        setEnvelopes({
+                          ...envelopes,
+                          husband_free_limit: Number(e.target.value),
+                          wife_free_limit: Number(e.target.value),
+                        })
+                      }
+                      className="w-full rounded-xl bg-zinc-900 border border-zinc-700 px-2.5 py-1.5 text-xs text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-zinc-400 mb-1">
+                      Meta Ahorro (€)
+                    </label>
+                    <input
+                      type="number"
+                      value={envelopes.savings_goal}
+                      onChange={(e) =>
+                        setEnvelopes({
+                          ...envelopes,
+                          savings_goal: Number(e.target.value),
+                        })
+                      }
+                      className="w-full rounded-xl bg-zinc-900 border border-zinc-700 px-2.5 py-1.5 text-xs text-white"
+                    />
+                  </div>
+                </div>
+              )}
+
+              <div className="space-y-3.5">
+                {metrics.envelopeList.map((env) => {
+                  const barColor =
+                    env.key === "ahorro"
+                      ? "bg-[#00D084]"
+                      : env.status === "exceeded100"
+                      ? "bg-rose-500"
+                      : env.status === "warning80"
+                      ? "bg-amber-400"
+                      : "bg-[#00D084]";
+                  return (
+                    <div key={env.key} className="space-y-1.5">
+                      <div className="flex justify-between text-xs">
+                        <span className="font-semibold text-white">
+                          {env.label}
+                        </span>
+                        <span className="font-bold text-zinc-200">
+                          {formatEUR(env.spent)}{" "}
+                          <span className="text-zinc-500 font-normal">
+                            / {formatEUR(env.limit)}
+                          </span>
+                        </span>
+                      </div>
+                      <div className="relative h-2.5 w-full rounded-full bg-zinc-900 overflow-hidden">
+                        <div
+                          className={`h-full rounded-full ${barColor}`}
+                          style={{ width: `${Math.min(env.percentage, 100)}%` }}
+                        />
+                        <div
+                          className="absolute top-0 bottom-0 w-0.5 bg-white/30"
+                          style={{ left: "80%" }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Recibos Fijos */}
+            <div className="rounded-3xl bg-[#111216] border border-zinc-800 p-5 space-y-3">
+              <div className="flex items-center justify-between">
+                <h2 className="text-base font-bold text-white flex items-center gap-2">
+                  <Receipt className="w-4 h-4 text-[#00D084]" />
+                  Recibos Fijos
+                </h2>
+                <button
+                  type="button"
+                  onClick={() =>
+                    accounts.length === 0
+                      ? setIsSyncModalOpen(true)
+                      : setIsAddingBill(!isAddingBill)
+                  }
+                  className="text-xs font-bold text-[#00D084]"
+                >
+                  + Añadir recibo
+                </button>
+              </div>
+
+              {isAddingBill && accounts.length > 0 && (
+                <form
+                  onSubmit={handleCreateFixedBill}
+                  className="p-3 rounded-2xl bg-black border border-zinc-800 space-y-2.5"
+                >
+                  <div className="grid grid-cols-2 gap-2">
+                    <input
+                      type="text"
+                      required
+                      value={newBillCode}
+                      onChange={(e) => setNewBillCode(e.target.value.toUpperCase())}
+                      placeholder="REC-LUZ"
+                      className="rounded-xl bg-zinc-900 border border-zinc-700 px-3 py-2 text-xs font-mono text-[#00D084]"
+                    />
+                    <input
+                      type="number"
+                      step="0.01"
+                      required
+                      value={newBillAmount}
+                      onChange={(e) => setNewBillAmount(e.target.value)}
+                      placeholder="Importe €"
+                      className="rounded-xl bg-zinc-900 border border-zinc-700 px-3 py-2 text-xs text-white"
+                    />
+                  </div>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      required
+                      value={newBillName}
+                      onChange={(e) => setNewBillName(e.target.value)}
+                      placeholder="Nombre (ej. Luz, Alquiler, Gimnasio)"
+                      className="flex-1 rounded-xl bg-zinc-900 border border-zinc-700 px-3 py-2 text-xs text-white"
+                    />
+                    <button
+                      type="submit"
+                      className="px-4 py-2 rounded-xl bg-[#00D084] text-black text-xs font-bold"
+                    >
+                      OK
+                    </button>
+                  </div>
+                </form>
+              )}
+
+              {fixedBills.length === 0 ? (
+                <p className="text-xs text-zinc-500 text-center py-3">
+                  Sin recibos fijos todavía.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {fixedBills.map((bill) => (
+                    <div
+                      key={bill.id}
+                      className="p-3 rounded-2xl bg-black border border-zinc-800 flex items-center justify-between gap-2"
+                    >
+                      <div>
+                        <span className="inline-flex items-center gap-1 text-[10px] font-mono text-[#00D084]">
+                          <Tag className="w-2.5 h-2.5" />
+                          {bill.custom_code}
+                        </span>
+                        <div className="text-xs font-bold text-white">
+                          {bill.name}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-bold text-white">
+                          {formatEUR(bill.expected_amount)}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleToggleFixedBill(bill)}
+                          className={`px-2.5 py-1 rounded-lg text-[11px] font-bold flex items-center gap-1 ${
+                            bill.is_paid_this_month
+                              ? "bg-[#00D084]/15 text-[#00D084]"
+                              : "bg-amber-500/15 text-amber-300"
+                          }`}
+                        >
+                          {bill.is_paid_this_month ? (
+                            <>
+                              <CheckCircle2 className="w-3 h-3" />
+                              Pagado
+                            </>
+                          ) : (
+                            <>
+                              <Clock className="w-3 h-3" />
+                              Pendiente
+                            </>
+                          )}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteFixedBill(bill.id)}
+                          className="text-zinc-600 hover:text-rose-400"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </section>
+        )}
+
+        {/* ===================================================================
+            PESTAÑA 4: ALERTAS (RADAR FINTONIC + PUSH MÓVIL)
+           =================================================================== */}
+        {activeTab === "alertas" && (
+          <section className="space-y-4">
             <div className="flex items-center justify-between">
-              <h2 className="text-sm font-bold text-white flex items-center gap-2">
-                <BellRing className="w-4 h-4 text-amber-400" />
-                Mis Alertas al Móvil (80% / 100%)
+              <h2 className="text-lg font-bold text-white">
+                Centro de Alertas
               </h2>
               <button
                 type="button"
                 onClick={() => setIsPhoneModalOpen(true)}
-                className="text-[11px] text-emerald-400 hover:underline"
+                className="py-1.5 px-3 rounded-xl bg-zinc-900 border border-zinc-800 text-xs font-semibold text-[#00D084] flex items-center gap-1.5"
               >
-                Configurar
+                <Phone className="w-3.5 h-3.5" />
+                {currentUser.phone || "Configurar móvil"}
               </button>
             </div>
 
-            {pushAlertsFeed.length === 0 ? (
-              <p className="text-xs text-slate-400 leading-relaxed">
-                Tus sobres están por debajo del 80%. Cuando un sobre llegue al
-                80% o al 100%, verás aquí el aviso y te saltará en tu móvil{" "}
-                {currentUser.phone ? `(${currentUser.phone})` : ""}.
-              </p>
+            {fintonicInsights.alerts.length === 0 && pushAlertsFeed.length === 0 ? (
+              <div className="rounded-3xl bg-[#111216] border border-zinc-800 p-6 text-center space-y-2">
+                <ShieldCheck className="w-8 h-8 text-[#00D084] mx-auto" />
+                <div className="text-sm font-bold text-white">
+                  Todo en orden
+                </div>
+                <p className="text-xs text-zinc-400">
+                  Sin cobros duplicados, sin comisiones bancarias y sin riesgo
+                  de descubierto.
+                </p>
+              </div>
             ) : (
               <div className="space-y-2.5">
-                {pushAlertsFeed.map((alert) => (
+                {fintonicInsights.alerts.map((alert) => (
                   <div
                     key={alert.id}
-                    className="p-3 rounded-2xl border bg-amber-950/50 border-amber-600/40 text-amber-200 text-xs space-y-1"
+                    className={`rounded-2xl border p-4 text-xs space-y-1 ${
+                      alert.severity === "critical"
+                        ? "bg-rose-950/50 border-rose-500/50 text-rose-200"
+                        : alert.severity === "warning"
+                        ? "bg-amber-950/40 border-amber-500/40 text-amber-200"
+                        : "bg-[#111216] border-zinc-800 text-zinc-200"
+                    }`}
                   >
-                    <div className="font-bold">{alert.title}</div>
-                    <p className="text-[11px] opacity-90">{alert.body}</p>
-                  </div>
-                ))}
-              </div>
-            )}
-          </section>
-
-          <section className="lg:col-span-2 rounded-3xl bg-slate-900/90 border border-slate-800 p-5">
-            <div className="flex items-center justify-between mb-3">
-              <h2 className="text-sm font-bold text-white">
-                Mis Movimientos Privados ({transactions.length})
-              </h2>
-              <button
-                type="button"
-                onClick={() =>
-                  accounts.length === 0
-                    ? setIsSyncModalOpen(true)
-                    : setIsManualModalOpen(true)
-                }
-                className="text-xs text-emerald-400 hover:underline font-semibold"
-              >
-                + Añadir movimiento
-              </button>
-            </div>
-
-            {transactions.length === 0 ? (
-              <div className="rounded-2xl bg-slate-950/60 border border-slate-800 p-6 text-center text-xs text-slate-400">
-                Aún no has registrado ningún movimiento. Todo lo que añadas o
-                importes será 100% privado para tu usuario.
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {transactions.slice(0, 12).map((tx) => (
-                  <div
-                    key={tx.id}
-                    className="flex items-center justify-between p-3 rounded-2xl bg-slate-950/75 border border-slate-800/80"
-                  >
-                    <div className="flex items-center gap-3 min-w-0">
-                      <div
-                        className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${
-                          tx.type === "income"
-                            ? "bg-emerald-500/20 text-emerald-400"
-                            : "bg-blue-500/20 text-blue-300"
-                        }`}
-                      >
-                        {tx.type === "income" ? (
-                          <ArrowUpRight className="w-4 h-4" />
+                    <div className="flex items-center justify-between font-bold">
+                      <span className="flex items-center gap-1.5">
+                        {alert.severity === "critical" ? (
+                          <AlertOctagon className="w-4 h-4 text-rose-400" />
                         ) : (
-                          <ArrowDownRight className="w-4 h-4" />
+                          <AlertTriangle className="w-4 h-4 text-amber-400" />
                         )}
-                      </div>
-
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs font-bold text-white truncate">
-                            {tx.concept}
-                          </span>
-                          {tx.custom_code && (
-                            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-emerald-300">
-                              {tx.custom_code}
-                            </span>
-                          )}
-                        </div>
-                        <div className="flex items-center gap-2 text-[11px] text-slate-400">
-                          <span className="uppercase text-slate-300 font-medium">
-                            {tx.envelope.replace("_", " ")}
-                          </span>
-                          <span>·</span>
-                          <span>{tx.date}</span>
-                        </div>
-                      </div>
+                        {alert.title}
+                      </span>
+                      {alert.amount !== undefined && (
+                        <span>{formatEUR(alert.amount)}</span>
+                      )}
                     </div>
+                    <p className="text-[11px] opacity-90">{alert.description}</p>
+                  </div>
+                ))}
 
-                    <div
-                      className={`text-sm font-bold shrink-0 ${
-                        tx.type === "income"
-                          ? "text-emerald-400"
-                          : "text-slate-100"
-                      }`}
-                    >
-                      {tx.type === "income" ? "+" : "-"}
-                      {formatEUR(tx.amount)}
-                    </div>
+                {pushAlertsFeed.map((a) => (
+                  <div
+                    key={a.id}
+                    className="rounded-2xl border border-amber-500/40 bg-amber-950/40 p-4 text-xs text-amber-200 space-y-1"
+                  >
+                    <div className="font-bold">{a.title}</div>
+                    <p className="text-[11px] opacity-90">{a.body}</p>
                   </div>
                 ))}
               </div>
             )}
           </section>
-        </div>
+        )}
+
+        {/* ===================================================================
+            PESTAÑA 5: FINSCORE (NOTA 300-900 + PREVISIÓN + CATEGORÍAS)
+           =================================================================== */}
+        {activeTab === "finscore" && (
+          <FintonicInsightsPanel insights={fintonicInsights} />
+        )}
       </main>
 
-      {/* Modales Interactivos Conectados a Supabase */}
+      {/* =====================================================================
+          BARRA DE NAVEGACIÓN INFERIOR FIJA ESTILO APP NATIVA FINTONIC
+         ===================================================================== */}
+      <nav className="fixed bottom-0 inset-x-0 z-40 bg-black/95 backdrop-blur-xl border-t border-zinc-900">
+        <div className="max-w-xl mx-auto grid grid-cols-5 py-2 px-1">
+          {[
+            { id: "inicio" as const, label: "Inicio", icon: Home },
+            { id: "movimientos" as const, label: "Movimientos", icon: ArrowLeftRight },
+            { id: "presupuesto" as const, label: "Presupuesto", icon: PieChart },
+            { id: "alertas" as const, label: "Alertas", icon: Bell },
+            { id: "finscore" as const, label: "FinScore", icon: Award },
+          ].map((item) => {
+            const Icon = item.icon;
+            const isActive = activeTab === item.id;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => setActiveTab(item.id)}
+                className={`flex flex-col items-center justify-center gap-1 py-1 transition ${
+                  isActive ? "text-[#00D084]" : "text-zinc-500 hover:text-zinc-300"
+                }`}
+              >
+                <div className="relative">
+                  <Icon className="w-5 h-5" />
+                  {item.id === "alertas" && criticalAlertsCount > 0 && (
+                    <span className="absolute -top-1 -right-1.5 w-2 h-2 rounded-full bg-rose-500" />
+                  )}
+                </div>
+                <span className="text-[10px] font-semibold">{item.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      </nav>
+
+      {/* Modales */}
       <BankSyncModal
         isOpen={isSyncModalOpen}
         onClose={() => setIsSyncModalOpen(false)}
