@@ -1,0 +1,35 @@
+{
+  "name": "control-bancario-familiar",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "generate:vapid": "npx web-push generate-vapid-keys"
+  },
+  "dependencies": {
+    "@google/genai": "^1.0.0",
+    "@supabase/ssr": "^0.6.1",
+    "@supabase/supabase-js": "^2.49.1",
+    "jose": "^6.0.8",
+    "lucide-react": "^0.487.0",
+    "next": "^15.2.4",
+    "papaparse": "^5.5.2",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "web-push": "^3.6.7",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.0.17",
+    "@types/node": "^22.13.10",
+    "@types/papaparse": "^5.3.15",
+    "@types/react": "^19.0.10",
+    "@types/react-dom": "^19.0.4",
+    "@types/web-push": "^3.6.4",
+    "tailwindcss": "^4.0.17",
+    "typescript": "^5.8.2"
+  }
+}
