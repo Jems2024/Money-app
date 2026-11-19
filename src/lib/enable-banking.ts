@@ -12,6 +12,7 @@ export interface SpanishBankASPSP {
 
 export const SPANISH_BANKS_PSD2: SpanishBankASPSP[] = [
   { name: "CaixaBank", country: "ES", bic: "CAIXESBBXXX", logoColor: "#007eae" },
+  { name: "imagin", country: "ES", bic: "CAIXESBBXXX", logoColor: "#00c4b4" },
   { name: "BBVA", country: "ES", bic: "BBVAESMMXXX", logoColor: "#004481" },
   { name: "Banco Santander", country: "ES", bic: "BSCHESMMXXX", logoColor: "#ec0000" },
   { name: "Banco Sabadell", country: "ES", bic: "BSABESBBXXX", logoColor: "#006dff" },
