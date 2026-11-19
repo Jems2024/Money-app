@@ -38,9 +38,9 @@ export default function BankSyncModal({
   onDataChanged,
 }: BankSyncModalProps) {
   const [tab, setTab] = useState<"create" | "csv" | "psd2">(
-    accounts.length === 0 ? "create" : "csv"
+    accounts.length === 0 ? "psd2" : "psd2"
   );
-  const [bankName, setBankName] = useState("CaixaBank");
+  const [bankName, setBankName] = useState("imagin");
   const [accountAlias, setAccountAlias] = useState("Mi Cuenta Principal");
   const [ibanLast4, setIbanLast4] = useState("");
   const [initialBalance, setInitialBalance] = useState("");
@@ -542,6 +542,53 @@ export default function BankSyncModal({
                 )}
                 Iniciar Autorización en {bankName}
               </button>
+
+              {accounts.some((a) => a.enable_banking_account_id) && (
+                <button
+                  type="button"
+                  disabled={isLoading}
+                  onClick={async () => {
+                    const psd2Acc = accounts.find(
+                      (a) => a.enable_banking_account_id
+                    );
+                    if (!psd2Acc) return;
+                    setIsLoading(true);
+                    setErrorMessage(null);
+                    setStatusMessage("Sincronizando saldo y movimientos reales...");
+                    try {
+                      const res = await fetch("/api/enable-banking/sync", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ bankAccountId: psd2Acc.id }),
+                      });
+                      const data = await res.json();
+                      if (!data.ok) {
+                        throw new Error(data.error || "Error al sincronizar");
+                      }
+                      await onDataChanged();
+                      setStatusMessage(
+                        `¡Sincronizado! Saldo: ${Number(
+                          data.currentBalance || 0
+                        ).toFixed(2)} € · ${
+                          (data.newTransactions || []).length
+                        } movimientos leídos.`
+                      );
+                    } catch (err) {
+                      setErrorMessage(
+                        err instanceof Error
+                          ? err.message
+                          : "Error sincronizando con el banco"
+                      );
+                    } finally {
+                      setIsLoading(false);
+                    }
+                  }}
+                  className="w-full py-2.5 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 border border-emerald-500/40 text-emerald-300 text-xs font-semibold transition flex items-center justify-center gap-2"
+                >
+                  <CheckCircle2 className="w-4 h-4" />
+                  Sincronizar Saldo y Movimientos Ahora
+                </button>
+              )}
             </div>
           )}
 

@@ -11,8 +11,8 @@ export interface SpanishBankASPSP {
 }
 
 export const SPANISH_BANKS_PSD2: SpanishBankASPSP[] = [
-  { name: "CaixaBank", country: "ES", bic: "CAIXESBBXXX", logoColor: "#007eae" },
   { name: "imagin", country: "ES", bic: "CAIXESBBXXX", logoColor: "#00c4b4" },
+  { name: "CaixaBank", country: "ES", bic: "CAIXESBBXXX", logoColor: "#007eae" },
   { name: "BBVA", country: "ES", bic: "BBVAESMMXXX", logoColor: "#004481" },
   { name: "Banco Santander", country: "ES", bic: "BSCHESMMXXX", logoColor: "#ec0000" },
   { name: "Banco Sabadell", country: "ES", bic: "BSABESBBXXX", logoColor: "#006dff" },
@@ -161,16 +161,44 @@ export async function exchangeEnableBankingCode(code: string) {
   }
 
   const sessionData = await response.json();
+  const rawAccounts = (sessionData.accounts || []) as Record<string, unknown>[];
+
+  const mappedAccounts = await Promise.all(
+    rawAccounts.map(async (acc) => {
+      const uid = String(acc.uid || acc.resource_id || "");
+      let realBalance = 0;
+
+      // Consultar el saldo real inmediato de la cuenta recién vinculada
+      if (uid) {
+        try {
+          const balRes = await fetch(
+            `${ENABLE_BANKING_BASE_URL}/accounts/${uid}/balances`,
+            { headers: { Authorization: `Bearer ${jwt}` } }
+          );
+          if (balRes.ok) {
+            const balJson = await balRes.json();
+            const firstBal = balJson.balances?.[0];
+            realBalance = Number(firstBal?.balance_amount?.amount || 0);
+          }
+        } catch {
+          // Si el banco retrasa el saldo, quedará en 0 hasta la próxima sincronización
+        }
+      }
+
+      return {
+        uid,
+        iban: String(
+          (acc.account_id as Record<string, unknown>)?.iban || "ES** **** **** ****"
+        ),
+        name: String(acc.name || acc.product || "Cuenta PSD2"),
+        balance: realBalance,
+      };
+    })
+  );
+
   return {
     session_id: sessionData.session_id as string,
-    accounts: (sessionData.accounts || []).map((acc: Record<string, unknown>) => ({
-      uid: String(acc.uid || acc.resource_id || ""),
-      iban: String(
-        (acc.account_id as Record<string, unknown>)?.iban || "ES** **** **** ****"
-      ),
-      name: String(acc.name || acc.product || "Cuenta PSD2"),
-      balance: 0,
-    })),
+    accounts: mappedAccounts,
   };
 }
 

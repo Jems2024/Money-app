@@ -98,10 +98,30 @@ export default function FamilyFinanceDashboard() {
   const [pushAlertsFeed, setPushAlertsFeed] = useState<
     { id: string; title: string; body: string; threshold: 80 | 100 }[]
   >([]);
+  const [psd2Banner, setPsd2Banner] = useState<{
+    type: "success" | "error";
+    text: string;
+  } | null>(null);
 
   useEffect(() => {
-    if (typeof window !== "undefined" && "serviceWorker" in navigator) {
-      navigator.serviceWorker.register("/sw.js").catch(() => {});
+    if (typeof window !== "undefined") {
+      if ("serviceWorker" in navigator) {
+        navigator.serviceWorker.register("/sw.js").catch(() => {});
+      }
+      const params = new URLSearchParams(window.location.search);
+      if (params.get("psd2_connected") === "true") {
+        setPsd2Banner({
+          type: "success",
+          text: `¡Cuenta de ${params.get("bank") || "imagin"} conectada con éxito! Ya puedes pulsar "Mi Banco / CSV -> Sincronizar" para descargar tus movimientos.`,
+        });
+        window.history.replaceState({}, "", "/");
+      } else if (params.get("psd2_error")) {
+        setPsd2Banner({
+          type: "error",
+          text: `No se pudo completar la conexión bancaria (${params.get("psd2_error")}). Asegúrate de elegir "imagin" en la pestaña 3. PSD2 Online.`,
+        });
+        window.history.replaceState({}, "", "/");
+      }
     }
   }, []);
 
@@ -537,6 +557,24 @@ export default function FamilyFinanceDashboard() {
       </header>
 
       <main className="max-w-5xl mx-auto px-4 pt-5 space-y-6">
+        {psd2Banner && (
+          <div
+            className={`p-4 rounded-2xl border text-xs flex items-center justify-between gap-3 ${
+              psd2Banner.type === "success"
+                ? "bg-emerald-950/80 border-emerald-500/60 text-emerald-200"
+                : "bg-rose-950/80 border-rose-500/60 text-rose-200"
+            }`}
+          >
+            <span>{psd2Banner.text}</span>
+            <button
+              type="button"
+              onClick={() => setPsd2Banner(null)}
+              className="text-xs underline shrink-0"
+            >
+              Cerrar
+            </button>
+          </div>
+        )}
         {/* ===================================================================
             PASO A PASO INICIAL SI AÚN NO HA VINCULADO SU CUENTA BANCARIA
            =================================================================== */}
