@@ -32,7 +32,9 @@ import {
   Transaction,
 } from "@/types/finance";
 import { createClient } from "@/lib/supabase/client";
+import { computeFintonicInsights } from "@/lib/fintonic-insights";
 import BankSyncModal from "./BankSyncModal";
+import FintonicInsightsPanel from "./FintonicInsightsPanel";
 import ManualTransactionModal from "./ManualTransactionModal";
 import PhoneAlertsModal from "./PhoneAlertsModal";
 import PrivateAuthScreen from "./PrivateAuthScreen";
@@ -75,9 +77,9 @@ export default function FamilyFinanceDashboard() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
 
   // Pestaña activa del panel individual
-  const [activeTab, setActiveTab] = useState<"resumen" | "cuentas" | "sobres">(
-    "resumen"
-  );
+  const [activeTab, setActiveTab] = useState<
+    "resumen" | "salud" | "cuentas" | "sobres"
+  >("resumen");
 
   // Modales
   const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
@@ -260,6 +262,12 @@ export default function FamilyFinanceDashboard() {
   const pendingReviewTransactions = useMemo(
     () => transactions.filter((t) => t.needs_review),
     [transactions]
+  );
+
+  // Motor de análisis privado estilo Fintonic (Nota 300-900, Previsión fin de mes, Duplicados y Comisiones)
+  const fintonicInsights = useMemo(
+    () => computeFintonicInsights(accounts, fixedBills, transactions, envelopes),
+    [accounts, fixedBills, transactions, envelopes]
   );
 
   // Evaluar umbrales 80% y 100% tras un gasto
@@ -515,7 +523,7 @@ export default function FamilyFinanceDashboard() {
 
         {/* Selector de Pestañas Privadas */}
         <div className="max-w-5xl mx-auto px-4 pb-3">
-          <div className="grid grid-cols-3 gap-1.5 p-1 rounded-2xl bg-slate-900/95 border border-slate-800">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 p-1 rounded-2xl bg-slate-900/95 border border-slate-800">
             <button
               type="button"
               onClick={() => setActiveTab("resumen")}
@@ -525,7 +533,27 @@ export default function FamilyFinanceDashboard() {
                   : "text-slate-400 hover:text-white"
               }`}
             >
-              Mi Resumen General
+              Resumen
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab("salud")}
+              className={`py-2 px-2 rounded-xl text-xs font-semibold transition flex items-center justify-center gap-1.5 ${
+                activeTab === "salud"
+                  ? "bg-emerald-600 text-white shadow"
+                  : "text-slate-400 hover:text-white"
+              }`}
+            >
+              <span>Salud y Alertas</span>
+              {fintonicInsights.alerts.some((a) => a.severity === "critical") && (
+                <span className="px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-rose-500 text-white">
+                  {
+                    fintonicInsights.alerts.filter(
+                      (a) => a.severity === "critical"
+                    ).length
+                  }
+                </span>
+              )}
             </button>
             <button
               type="button"
@@ -536,7 +564,7 @@ export default function FamilyFinanceDashboard() {
                   : "text-slate-400 hover:text-white"
               }`}
             >
-              <span>Mi Banco y Recibos ({accounts.length})</span>
+              <span>Banco y Recibos ({accounts.length})</span>
               {metrics.hasOverdraftRisk && (
                 <AlertTriangle className="w-3.5 h-3.5 text-amber-300" />
               )}
@@ -550,7 +578,7 @@ export default function FamilyFinanceDashboard() {
                   : "text-slate-400 hover:text-white"
               }`}
             >
-              Mis Sobres del Mes
+              Mis Sobres
             </button>
           </div>
         </div>
@@ -712,6 +740,13 @@ export default function FamilyFinanceDashboard() {
             </div>
           )}
         </section>
+
+        {/* ===================================================================
+            PANEL ESTILO FINTONIC: NOTA 300-900, PREVISIÓN Y RADAR DE ALERTAS
+           =================================================================== */}
+        {(activeTab === "resumen" || activeTab === "salud") && (
+          <FintonicInsightsPanel insights={fintonicInsights} />
+        )}
 
         {/* ===================================================================
             MIS CUENTAS BANCARIAS CONFIGURADAS (CON EDITOR DE SALDO)
