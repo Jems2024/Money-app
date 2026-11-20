@@ -60,6 +60,7 @@ interface AuthenticatedUserProfile {
   display_name: string;
   role: FamilyRole;
   phone: string;
+  whatsappApiKey?: string;
 }
 
 type FintonicTab = "inicio" | "movimientos" | "presupuesto" | "alertas" | "finscore";
@@ -1452,9 +1453,12 @@ export default function FamilyFinanceDashboard() {
         onClose={() => setIsPhoneModalOpen(false)}
         userId={currentUser.id}
         currentPhone={currentUser.phone}
-        onPhoneSaved={(newPhone) => {
+        currentWhatsappApiKey={currentUser.whatsappApiKey || ""}
+        onPhoneSaved={(newPhone, newApiKey) => {
           setCurrentUser((prev) =>
-            prev ? { ...prev, phone: newPhone } : null
+            prev
+              ? { ...prev, phone: newPhone, whatsappApiKey: newApiKey }
+              : null
           );
         }}
       />

@@ -5,6 +5,7 @@ import {
   sendWebPushToBothSpouses,
 } from "@/lib/web-push";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
+import { sendWhatsAppAlert } from "@/lib/whatsapp";
 import {
   EnvelopeCategory,
   MonthlyEnvelopes,
@@ -117,17 +118,34 @@ export async function POST(request: NextRequest) {
         .like("month_year", `%_${user.id}`);
     }
 
+    const userPhone = String(user.user_metadata?.phone || "");
+    const userWhatsappKey = String(user.user_metadata?.whatsapp_apikey || "");
+
     const pushResults = [];
     for (const alert of evaluation.triggeredAlerts) {
+      // 1. Envío por Web Push (si hay suscripción activa)
       const dispatch = await sendWebPushToBothSpouses(subscriptions, {
         title: alert.title,
         body: alert.body,
         tag: `envelope-${alert.envelope}-${alert.threshold}`,
         url: "/",
       });
+
+      // 2. Envío directo al WhatsApp personal del usuario (0 € vía CallMeBot)
+      let whatsappSent = false;
+      if (userPhone && userWhatsappKey) {
+        const waRes = await sendWhatsAppAlert({
+          phone: userPhone,
+          apiKey: userWhatsappKey,
+          message: `*${alert.title}*\n${alert.body}`,
+        });
+        whatsappSent = waRes.ok;
+      }
+
       pushResults.push({
         ...alert,
         dispatch,
+        whatsappSent,
       });
     }
 

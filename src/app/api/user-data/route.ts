@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
+import { sendWhatsAppAlert } from "@/lib/whatsapp";
 
 const ALLOWED_ENVELOPES = new Set([
   "hormiga",
@@ -131,6 +132,7 @@ export async function GET() {
       user.user_metadata?.phone ||
       pushSubs?.find((s) => s.endpoint?.startsWith("phone://"))?.auth ||
       "";
+    const whatsappApiKey = String(user.user_metadata?.whatsapp_apikey || "");
 
     return NextResponse.json({
       ok: true,
@@ -140,6 +142,7 @@ export async function GET() {
         display_name: profile.display_name,
         role: profile.role,
         phone,
+        whatsappApiKey,
       },
       accounts: safeAccounts,
       fixedBills: safeBills,
@@ -459,28 +462,55 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ ok: true, transaction: updated });
     }
 
-    // 8. Guardar número de teléfono móvil del usuario
+    // 8. Guardar número de WhatsApp y API Key gratuita de CallMeBot del usuario
     if (action === "save_phone") {
       const phone = String(body.phone || "").trim().slice(0, 25);
+      const whatsappApiKey = String(body.whatsappApiKey || "").trim().slice(0, 40);
+
       await admin.auth.admin.updateUserById(user.id, {
         user_metadata: {
           ...user.user_metadata,
           phone,
+          whatsapp_apikey: whatsappApiKey,
         },
       });
 
       await admin.from("push_subscriptions").upsert(
         {
           user_id: user.id,
-          device_name: `Móvil (${phone})`,
+          device_name: `WhatsApp (${phone})`,
           endpoint: `phone://${user.id}/${encodeURIComponent(phone)}`,
-          p256dh: "phone-registered",
+          p256dh: whatsappApiKey || "phone-registered",
           auth: phone,
         },
         { onConflict: "endpoint" }
       );
 
-      return NextResponse.json({ ok: true, phone });
+      return NextResponse.json({ ok: true, phone, whatsappApiKey });
+    }
+
+    // 8B. Enviar mensaje real de prueba por WhatsApp al número del usuario
+    if (action === "test_whatsapp") {
+      const phone = String(body.phone || user.user_metadata?.phone || "").trim();
+      const apiKey = String(
+        body.whatsappApiKey || user.user_metadata?.whatsapp_apikey || ""
+      ).trim();
+
+      const result = await sendWhatsAppAlert({
+        phone,
+        apiKey,
+        message:
+          "✅ *StopEnds Bancario*: ¡Tus alertas privadas por WhatsApp están activas! Te avisaré aquí cuando cualquier sobre llegue al 80% o al 100%.",
+      });
+
+      if (!result.ok) {
+        return NextResponse.json(
+          { ok: false, error: result.error },
+          { status: 400 }
+        );
+      }
+
+      return NextResponse.json({ ok: true, sent: true });
     }
 
     // 9. Eliminar una cuenta bancaria propia (y en cascada sus movimientos/recibos)
