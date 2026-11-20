@@ -186,8 +186,25 @@ export async function exchangeEnableBankingCode(code: string) {
   };
 }
 
+function pickBestAvailableBalance(balances: Record<string, unknown>[]): number {
+  if (!Array.isArray(balances) || balances.length === 0) return 0;
+  // Priorizar saldo disponible real (ya descuenta pagos recientes con tarjeta retenidos en CaixaBank/imagin)
+  const priorityTypes = ["ITAV", "XPCD", "CLAV", "ITBD", "CLBD"];
+  for (const bType of priorityTypes) {
+    const match = balances.find((b) => String(b.balance_type || "") === bType);
+    if (match) {
+      const amt = (match.balance_amount as Record<string, unknown> | undefined)?.amount;
+      if (amt !== undefined && !Number.isNaN(Number(amt))) {
+        return Number(amt);
+      }
+    }
+  }
+  const firstAmt = (balances[0]?.balance_amount as Record<string, unknown> | undefined)?.amount;
+  return Number(firstAmt || 0);
+}
+
 /**
- * Descarga saldo actual y últimos movimientos desde Enable Banking PSD2 para una cuenta vinculada
+ * Descarga saldo disponible real y últimos movimientos (incluyendo recientes/pendientes) desde Enable Banking PSD2
  */
 export async function fetchEnableBankingAccountSync(
   enableBankingAccountId: string,
@@ -200,8 +217,11 @@ export async function fetchEnableBankingAccountSync(
   }
 
   const jwt = await createEnableBankingJWT();
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10);
 
-  const [balRes, txRes] = await Promise.all([
+  const [balRes, txBookedRes, txPendingRes] = await Promise.all([
     fetch(
       `${ENABLE_BANKING_BASE_URL}/accounts/${enableBankingAccountId}/balances`,
       {
@@ -209,20 +229,36 @@ export async function fetchEnableBankingAccountSync(
       }
     ),
     fetch(
-      `${ENABLE_BANKING_BASE_URL}/accounts/${enableBankingAccountId}/transactions`,
+      `${ENABLE_BANKING_BASE_URL}/accounts/${enableBankingAccountId}/transactions?date_from=${thirtyDaysAgo}`,
       {
         headers: { Authorization: `Bearer ${jwt}` },
       }
     ),
+    fetch(
+      `${ENABLE_BANKING_BASE_URL}/accounts/${enableBankingAccountId}/transactions?date_from=${thirtyDaysAgo}&transaction_status=PDNG`,
+      {
+        headers: { Authorization: `Bearer ${jwt}` },
+      }
+    ).catch(() => null),
   ]);
 
   let currentBalance = 0;
   if (balRes.ok) {
     const balJson = await balRes.json();
-    const firstBal = balJson.balances?.[0];
-    currentBalance = Number(firstBal?.balance_amount?.amount || 0);
+    currentBalance = pickBestAvailableBalance(balJson.balances || []);
   }
 
+  const rawList: Record<string, unknown>[] = [];
+  if (txBookedRes.ok) {
+    const txJson = await txBookedRes.json();
+    rawList.push(...((txJson.transactions || []) as Record<string, unknown>[]));
+  }
+  if (txPendingRes && txPendingRes.ok) {
+    const pendingJson = await txPendingRes.json();
+    rawList.push(...((pendingJson.transactions || []) as Record<string, unknown>[]));
+  }
+
+  const seenIds = new Set<string>();
   const transactions: {
     external_tx_id: string;
     date: string;
@@ -231,27 +267,41 @@ export async function fetchEnableBankingAccountSync(
     type: "income" | "expense";
   }[] = [];
 
-  if (txRes.ok) {
-    const txJson = await txRes.json();
-    for (const rawTx of txJson.transactions || []) {
-      const signedAmount = Number(rawTx.transaction_amount?.amount || 0);
-      const isCredit =
-        rawTx.credit_debit_indicator === "CRDT" || signedAmount > 0;
-      transactions.push({
-        external_tx_id: String(
-          rawTx.entry_reference || rawTx.transaction_id || `${Date.now()}-${Math.random()}`
-        ),
-        date: String(rawTx.booking_date || rawTx.value_date || new Date().toISOString().slice(0, 10)),
-        concept: String(
-          rawTx.remittance_information?.[0] ||
-            rawTx.creditor?.name ||
-            rawTx.debtor?.name ||
-            "Movimiento Bancario PSD2"
-        ),
-        amount: Math.abs(signedAmount),
-        type: isCredit ? "income" : "expense",
-      });
-    }
+  for (const rawTx of rawList) {
+    const txAmtObj = rawTx.transaction_amount as Record<string, unknown> | undefined;
+    const signedAmount = Number(txAmtObj?.amount || 0);
+    const isCredit =
+      rawTx.credit_debit_indicator === "CRDT" || signedAmount > 0;
+    const txDate = String(
+      rawTx.booking_date ||
+        rawTx.value_date ||
+        rawTx.transaction_date ||
+        new Date().toISOString().slice(0, 10)
+    ).slice(0, 10);
+    const remittance = Array.isArray(rawTx.remittance_information)
+      ? rawTx.remittance_information[0]
+      : undefined;
+    const creditorName = (rawTx.creditor as Record<string, unknown> | undefined)?.name;
+    const debtorName = (rawTx.debtor as Record<string, unknown> | undefined)?.name;
+    const concept = String(
+      remittance || creditorName || debtorName || "Movimiento Bancario PSD2"
+    );
+    const extId = String(
+      rawTx.entry_reference ||
+        rawTx.transaction_id ||
+        `${txDate}-${concept.slice(0, 20)}-${Math.abs(signedAmount)}`
+    );
+
+    if (seenIds.has(extId)) continue;
+    seenIds.add(extId);
+
+    transactions.push({
+      external_tx_id: extId,
+      date: txDate,
+      concept,
+      amount: Math.abs(signedAmount),
+      type: isCredit ? "income" : "expense",
+    });
   }
 
   return { currentBalance, transactions };

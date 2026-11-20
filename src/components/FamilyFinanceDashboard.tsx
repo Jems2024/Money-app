@@ -102,6 +102,7 @@ export default function FamilyFinanceDashboard() {
   const [tempBalanceValue, setTempBalanceValue] = useState<string>("");
   const [syncingAccountId, setSyncingAccountId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [didAutoSync, setDidAutoSync] = useState(false);
 
   // Nuevo recibo fijo
   const [newBillCode, setNewBillCode] = useState("REC-LUZ");
@@ -171,6 +172,35 @@ export default function FamilyFinanceDashboard() {
   useEffect(() => {
     loadPrivateUserData();
   }, [loadPrivateUserData]);
+
+  // Auto-sincronización silenciosa al abrir la app si pasaron > 5 min desde el último sync PSD2
+  useEffect(() => {
+    if (didAutoSync || accounts.length === 0) return;
+    const psd2Acc = accounts.find((a) => a.enable_banking_account_id);
+    if (!psd2Acc) return;
+
+    const lastSyncMs = psd2Acc.last_synced_at
+      ? new Date(psd2Acc.last_synced_at).getTime()
+      : 0;
+    const fiveMinutes = 5 * 60 * 1000;
+    if (Date.now() - lastSyncMs > fiveMinutes) {
+      setDidAutoSync(true);
+      fetch("/api/enable-banking/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bankAccountId: psd2Acc.id }),
+      })
+        .then((r) => r.json())
+        .then((data) => {
+          if (data.ok) {
+            loadPrivateUserData();
+          }
+        })
+        .catch(() => {});
+    } else {
+      setDidAutoSync(true);
+    }
+  }, [accounts, didAutoSync, loadPrivateUserData]);
 
   // Cálculos principales
   const metrics = useMemo(() => {
@@ -691,14 +721,35 @@ export default function FamilyFinanceDashboard() {
 
               {/* Acciones rápidas estilo Fintonic */}
               <div className="grid grid-cols-2 gap-2.5 pt-1">
-                <button
-                  type="button"
-                  onClick={() => setIsSyncModalOpen(true)}
-                  className="py-2.5 px-3 rounded-2xl bg-[#00D084] hover:bg-[#00b874] text-black text-xs font-bold flex items-center justify-center gap-1.5 transition"
-                >
-                  <Building2 className="w-4 h-4" />
-                  Conectar / Subir CSV
-                </button>
+                {accounts.some((a) => a.enable_banking_account_id) ? (
+                  <button
+                    type="button"
+                    disabled={Boolean(syncingAccountId)}
+                    onClick={() => {
+                      const psd2Acc = accounts.find(
+                        (a) => a.enable_banking_account_id
+                      );
+                      if (psd2Acc) handleSyncAccountPSD2(psd2Acc);
+                    }}
+                    className="py-2.5 px-3 rounded-2xl bg-[#00D084] hover:bg-[#00b874] text-black text-xs font-bold flex items-center justify-center gap-1.5 transition"
+                  >
+                    <RefreshCw
+                      className={`w-4 h-4 ${
+                        syncingAccountId ? "animate-spin" : ""
+                      }`}
+                    />
+                    {syncingAccountId ? "Actualizando..." : "Actualizar banco"}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setIsSyncModalOpen(true)}
+                    className="py-2.5 px-3 rounded-2xl bg-[#00D084] hover:bg-[#00b874] text-black text-xs font-bold flex items-center justify-center gap-1.5 transition"
+                  >
+                    <Building2 className="w-4 h-4" />
+                    Conectar / Subir CSV
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() =>
